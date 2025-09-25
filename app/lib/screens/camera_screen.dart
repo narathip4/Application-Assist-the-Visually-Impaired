@@ -8,17 +8,20 @@ class CameraScreen extends StatefulWidget {
   const CameraScreen({Key? key, required this.cameras}) : super(key: key);
 
   @override
-  _CameraScreenState createState() => _CameraScreenState();
+  State<CameraScreen> createState() => _CameraScreenState();
 }
 
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? controller;
+  int currentCameraIndex = 0;
   bool isInitialized = false;
   bool isPermissionGranted = false;
-  int currentCameraIndex = 0; // Track current camera
-  bool isSwitching = false; // Track if camera is switching
-  bool isFlashOn = false; // Track flash state
-  bool isSoundEnabled = true; // Track sound state
+  bool isSwitching = false;
+  bool isFlashOn = false;
+  bool isSoundEnabled = true;
+  String? errorMessage;
+  String displayText =
+      "Text that text-to-speech will read appears here"; // Text to display
 
   @override
   void initState() {
@@ -28,47 +31,52 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _initializeCamera() async {
     final status = await Permission.camera.request();
+    if (!mounted) return;
 
     if (status == PermissionStatus.granted) {
       setState(() {
         isPermissionGranted = true;
+        errorMessage = null;
       });
-
       if (widget.cameras.isNotEmpty) {
         await _setupCamera(currentCameraIndex);
       }
     } else {
-      setState(() {
-        isPermissionGranted = false;
-      });
+      setState(() => isPermissionGranted = false);
     }
   }
 
-  Future<void> _setupCamera(int cameraIndex) async {
+  Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
-    // Dispose previous controller
     await controller?.dispose();
 
-    // Create new controller
-    controller = CameraController(
-      widget.cameras[cameraIndex],
-      ResolutionPreset.high,
+    final newController = CameraController(
+      widget.cameras[index],
+      ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     try {
-      await controller!.initialize();
-      if (mounted) {
-        setState(() {
-          isInitialized = true;
-          isSwitching = false;
-        });
-      }
+      await newController.initialize();
+      if (!mounted) return;
+
+      // Reset flash เป็น off ทุกครั้ง
+      await newController.setFlashMode(FlashMode.off);
+
+      setState(() {
+        controller = newController;
+        isInitialized = true;
+        isSwitching = false;
+        isFlashOn = false;
+        errorMessage = null;
+      });
     } catch (e) {
-      print('Error initializing camera: $e');
+      debugPrint('Error initializing camera: $e');
       setState(() {
         isSwitching = false;
+        errorMessage = "ไม่สามารถเปิดกล้องได้";
       });
     }
   }
@@ -81,9 +89,7 @@ class _CameraScreenState extends State<CameraScreen> {
       isInitialized = false;
     });
 
-    // Find next camera
     currentCameraIndex = (currentCameraIndex + 1) % widget.cameras.length;
-
     await _setupCamera(currentCameraIndex);
   }
 
@@ -91,55 +97,36 @@ class _CameraScreenState extends State<CameraScreen> {
     if (controller == null || !controller!.value.isInitialized) return;
 
     try {
-      await controller!.setFlashMode(
-        isFlashOn ? FlashMode.off : FlashMode.torch,
-      );
-      setState(() {
-        isFlashOn = !isFlashOn;
-      });
+      final newMode = isFlashOn ? FlashMode.off : FlashMode.torch;
+      await controller!.setFlashMode(newMode);
+      setState(() => isFlashOn = !isFlashOn);
     } catch (e) {
-      print('Error toggling flash: $e');
+      debugPrint('Error toggling flash: $e');
+    }
+  }
+
+  Future<void> takePicture() async {
+    if (controller == null ||
+        !controller!.value.isInitialized ||
+        controller!.value.isTakingPicture)
+      return;
+
+    try {
+      final image = await controller!.takePicture();
+      debugPrint('Picture taken: ${image.path}');
+      // TODO: ส่ง path ไปหน้าอื่นหรือ process ต่อ
+    } catch (e) {
+      debugPrint('Error taking picture: $e');
     }
   }
 
   void toggleSound() {
-    setState(() {
-      isSoundEnabled = !isSoundEnabled;
-    });
+    setState(() => isSoundEnabled = !isSoundEnabled);
+    debugPrint('Sound ${isSoundEnabled ? 'enabled' : 'disabled'}');
   }
 
   void openSettings() {
-    // Implement settings functionality
-    print('Opening settings...');
-  }
-
-  // Get camera type for current camera
-  String get currentCameraType {
-    if (widget.cameras.isEmpty) return 'Unknown';
-
-    final camera = widget.cameras[currentCameraIndex];
-    switch (camera.lensDirection) {
-      case CameraLensDirection.front:
-        return 'Front Camera';
-      case CameraLensDirection.back:
-        return 'Back Camera';
-      case CameraLensDirection.external:
-        return 'External Camera';
-    }
-  }
-
-  // Check if front camera is available
-  bool get hasFrontCamera {
-    return widget.cameras.any(
-      (camera) => camera.lensDirection == CameraLensDirection.front,
-    );
-  }
-
-  // Check if back camera is available
-  bool get hasBackCamera {
-    return widget.cameras.any(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
-    );
+    debugPrint('Opening settings...');
   }
 
   @override
@@ -157,26 +144,19 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Widget _buildBody() {
-    if (!isPermissionGranted) {
-      return _buildPermissionDenied();
-    }
-
+    if (!isPermissionGranted) return _buildPermissionDenied();
+    if (errorMessage != null) return _buildErrorView();
     if (!isInitialized || controller == null || isSwitching) {
       return _buildLoadingView();
     }
-
     return _buildCameraView();
   }
 
   Widget _buildCameraView() {
-    final size = MediaQuery.of(context).size;
-
     return Stack(
       children: [
-        // Camera Preview
-        SizedBox(
-          width: size.width,
-          height: size.height,
+        // Camera Preview เต็มจอ
+        SizedBox.expand(
           child: FittedBox(
             fit: BoxFit.cover,
             child: SizedBox(
@@ -186,15 +166,10 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
         ),
-
-        // Top Controls
         _buildTopControls(),
-
-        // Camera Sight/Viewfinder
         _buildCameraSight(),
-
-        // Bottom Controls
-        _buildBottomControls(),
+        _buildTextDisplayBox(),
+        _buildBottomControlsContainer(),
       ],
     );
   }
@@ -202,163 +177,100 @@ class _CameraScreenState extends State<CameraScreen> {
   Widget _buildTopControls() {
     return Positioned(
       top: 20,
-      left: 0,
-      right: 0,
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: 20),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            // Settings Button
-            GestureDetector(
-              onTap: openSettings,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.3),
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: Icon(Icons.settings, color: Colors.white, size: 24),
-              ),
-            ),
-
-            // Flash Button
-            GestureDetector(
-              onTap: toggleFlash,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.3),
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: Icon(
-                  isFlashOn ? Icons.flash_on : Icons.flash_off,
-                  color: isFlashOn ? Colors.yellow : Colors.white,
-                  size: 24,
-                ),
-              ),
-            ),
-          ],
-        ),
+      left: 20,
+      right: 20,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          _circleButton(Icons.settings, openSettings),
+          _circleButton(
+            isFlashOn ? Icons.flash_on : Icons.flash_off,
+            toggleFlash,
+            color: isFlashOn ? Colors.yellow : Colors.white,
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildCameraSight() {
     return Center(
-      child: Container(
+      child: SizedBox(
         width: 200,
         height: 200,
-        decoration: BoxDecoration(),
-        child: Stack(
-          children: [
-            // Corner brackets for viewfinder effect
-            Positioned(
-              top: 10,
-              left: 10,
-              child: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  border: Border(
-                    top: BorderSide(color: Colors.white, width: 3),
-                    left: BorderSide(color: Colors.white, width: 3),
-                  ),
-                ),
-              ),
-            ),
-            Positioned(
-              top: 10,
-              right: 10,
-              child: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  border: Border(
-                    top: BorderSide(color: Colors.white, width: 3),
-                    right: BorderSide(color: Colors.white, width: 3),
-                  ),
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: 10,
-              left: 10,
-              child: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(color: Colors.white, width: 3),
-                    left: BorderSide(color: Colors.white, width: 3),
-                  ),
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: 10,
-              right: 10,
-              child: Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(color: Colors.white, width: 3),
-                    right: BorderSide(color: Colors.white, width: 3),
-                  ),
-                ),
-              ),
-            ),
-            // Center crosshair
-            Center(
-              child: Container(
-                width: 4,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-          ],
+        child: CustomPaint(painter: _SightPainter()),
+      ),
+    );
+  }
+
+  Widget _buildTextDisplayBox() {
+    return Positioned(
+      bottom: 120, // Position above the bottom controls
+      left: 20,
+      right: 20,
+      child: Container(
+        padding: EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.7),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white.withOpacity(0.3), width: 1),
+        ),
+        child: Text(
+          displayText,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.w400,
+          ),
+          textAlign: TextAlign.center,
         ),
       ),
     );
   }
 
-  Widget _buildBottomControls() {
+  Widget _shutterButton(VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 70,
+        height: 70,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white,
+          border: Border.all(color: Colors.grey.shade400, width: 3),
+        ),
+        child: Center(
+          child: Container(
+            width: 60,
+            height: 60,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomControlsContainer() {
     return Positioned(
-      bottom: 50,
+      bottom: 0,
       left: 0,
       right: 0,
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        height: 100,
+        color: Colors.black,
         child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
-            // Switch Camera Button (Left)
             if (widget.cameras.length > 1)
-              GestureDetector(
-                onTap: switchCamera,
-                child: Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(
-                      color: Colors.white.withOpacity(0.3),
-                      width: 2,
-                    ),
-                  ),
-                  child: Icon(
-                    Icons.flip_camera_ios,
-                    color: Colors.white,
-                    size: 28,
-                  ),
-                ),
-              ),
+              _circleButton(Icons.flip_camera_ios, switchCamera),
+            _shutterButton(takePicture),
+            _circleButton(
+              isSoundEnabled ? Icons.volume_up : Icons.volume_off,
+              toggleSound,
+            ),
           ],
         ),
       ),
@@ -367,89 +279,124 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Widget _buildLoadingView() {
     return Container(
-      width: double.infinity,
-      height: double.infinity,
+      alignment: Alignment.center,
       color: Colors.black,
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-            SizedBox(height: 20),
-            Text(
-              isSwitching ? 'Switching Camera...' : 'Loading Camera...',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w300,
-              ),
-            ),
-          ],
-        ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+          const SizedBox(height: 16),
+          Text(
+            isSwitching ? 'Switching Camera...' : 'Loading Camera...',
+            style: const TextStyle(color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrorView() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, size: 80, color: Colors.red),
+          const SizedBox(height: 16),
+          Text(
+            errorMessage ?? "Unknown error",
+            style: const TextStyle(color: Colors.white, fontSize: 18),
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: () => _setupCamera(currentCameraIndex),
+            child: const Text('Retry'),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildPermissionDenied() {
-    return Container(
-      width: double.infinity,
-      height: double.infinity,
-      color: Colors.black,
-      child: Center(
-        child: Padding(
-          padding: EdgeInsets.all(32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.camera_alt_outlined, size: 80, color: Colors.white54),
-              SizedBox(height: 24),
-              Text(
-                'Camera Access Required',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              SizedBox(height: 12),
-              Text(
-                'This app needs camera permission to function properly',
-                style: TextStyle(color: Colors.white70, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-              SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: () async {
-                  await openAppSettings();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.black,
-                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                child: Text(
-                  'Open Settings',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-                ),
-              ),
-              SizedBox(height: 16),
-              TextButton(
-                onPressed: () {
-                  _initializeCamera();
-                },
-                child: Text(
-                  'Try Again',
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
-                ),
-              ),
-            ],
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.camera_alt_outlined,
+            size: 80,
+            color: Colors.white54,
           ),
-        ),
+          const SizedBox(height: 16),
+          const Text(
+            'Camera Access Required',
+            style: TextStyle(color: Colors.white, fontSize: 18),
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: () => openAppSettings(),
+            child: const Text('Open Settings'),
+          ),
+          const SizedBox(height: 12),
+          TextButton(
+            onPressed: _initializeCamera,
+            child: const Text(
+              'Try Again',
+              style: TextStyle(color: Colors.white70),
+            ),
+          ),
+        ],
       ),
     );
   }
+
+  Widget _circleButton(
+    IconData icon,
+    VoidCallback onTap, {
+    Color color = Colors.white,
+    Color bgColor = const Color.fromARGB(100, 0, 0, 0),
+    double size = 44,
+    double iconSize = 24,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+        child: iconSize > 0
+            ? Icon(icon, color: color, size: iconSize)
+            : null, // สำหรับ shutter button
+      ),
+    );
+  }
+}
+
+// Painter สำหรับ sight
+class _SightPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 3
+      ..style = PaintingStyle.stroke;
+
+    const len = 20.0;
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // มุม
+    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(len, 0), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(0, len), paint);
+    canvas.drawLine(rect.topRight, rect.topRight - Offset(len, 0), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + Offset(0, len), paint);
+    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + Offset(len, 0), paint);
+    canvas.drawLine(rect.bottomLeft, rect.bottomLeft - Offset(0, len), paint);
+    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(len, 0), paint);
+    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(0, len), paint);
+
+    // crosshair
+    canvas.drawCircle(rect.center, 2, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
