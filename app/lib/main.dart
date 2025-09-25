@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'screens/home_screen.dart';
+import 'screens/camera_screen.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -25,7 +25,7 @@ class MyApp extends StatelessWidget {
         primarySwatch: Colors.blue,
         visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
-      home: HomeScreen(cameras: cameras),
+      home: CameraScreen(cameras: cameras),
       debugShowCheckedModeBanner: false,
     );
   }

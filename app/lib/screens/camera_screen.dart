@@ -2,21 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-class HomeScreen extends StatefulWidget {
+class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
 
-  const HomeScreen({Key? key, required this.cameras}) : super(key: key);
+  const CameraScreen({Key? key, required this.cameras}) : super(key: key);
 
   @override
-  _HomeScreenState createState() => _HomeScreenState();
+  _CameraScreenState createState() => _CameraScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _CameraScreenState extends State<CameraScreen> {
   CameraController? controller;
   bool isInitialized = false;
   bool isPermissionGranted = false;
   int currentCameraIndex = 0; // Track current camera
   bool isSwitching = false; // Track if camera is switching
+  bool isFlashOn = false; // Track flash state
+  bool isSoundEnabled = true; // Track sound state
 
   @override
   void initState() {
@@ -85,6 +87,32 @@ class _HomeScreenState extends State<HomeScreen> {
     await _setupCamera(currentCameraIndex);
   }
 
+  Future<void> toggleFlash() async {
+    if (controller == null || !controller!.value.isInitialized) return;
+
+    try {
+      await controller!.setFlashMode(
+        isFlashOn ? FlashMode.off : FlashMode.torch,
+      );
+      setState(() {
+        isFlashOn = !isFlashOn;
+      });
+    } catch (e) {
+      print('Error toggling flash: $e');
+    }
+  }
+
+  void toggleSound() {
+    setState(() {
+      isSoundEnabled = !isSoundEnabled;
+    });
+  }
+
+  void openSettings() {
+    // Implement settings functionality
+    print('Opening settings...');
+  }
+
   // Get camera type for current camera
   String get currentCameraType {
     if (widget.cameras.isEmpty) return 'Unknown';
@@ -124,15 +152,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: _buildBody(),
-      // Temporary way to test camera switching - you can remove this later
-      floatingActionButton: widget.cameras.length > 1
-          ? FloatingActionButton(
-              onPressed: switchCamera,
-              backgroundColor: Colors.white.withOpacity(0.3),
-              child: Icon(Icons.flip_camera_ios, color: Colors.white),
-            )
-          : null,
+      body: SafeArea(child: _buildBody()),
     );
   }
 
@@ -166,7 +186,182 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+
+        // Top Controls
+        _buildTopControls(),
+
+        // Camera Sight/Viewfinder
+        _buildCameraSight(),
+
+        // Bottom Controls
+        _buildBottomControls(),
       ],
+    );
+  }
+
+  Widget _buildTopControls() {
+    return Positioned(
+      top: 20,
+      left: 0,
+      right: 0,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Settings Button
+            GestureDetector(
+              onTap: openSettings,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Icon(Icons.settings, color: Colors.white, size: 24),
+              ),
+            ),
+
+            // Flash Button
+            GestureDetector(
+              onTap: toggleFlash,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Icon(
+                  isFlashOn ? Icons.flash_on : Icons.flash_off,
+                  color: isFlashOn ? Colors.yellow : Colors.white,
+                  size: 24,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraSight() {
+    return Center(
+      child: Container(
+        width: 200,
+        height: 200,
+        decoration: BoxDecoration(),
+        child: Stack(
+          children: [
+            // Corner brackets for viewfinder effect
+            Positioned(
+              top: 10,
+              left: 10,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(color: Colors.white, width: 3),
+                    left: BorderSide(color: Colors.white, width: 3),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 10,
+              right: 10,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(color: Colors.white, width: 3),
+                    right: BorderSide(color: Colors.white, width: 3),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 10,
+              left: 10,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Colors.white, width: 3),
+                    left: BorderSide(color: Colors.white, width: 3),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 10,
+              right: 10,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Colors.white, width: 3),
+                    right: BorderSide(color: Colors.white, width: 3),
+                  ),
+                ),
+              ),
+            ),
+            // Center crosshair
+            Center(
+              child: Container(
+                width: 4,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomControls() {
+    return Positioned(
+      bottom: 50,
+      left: 0,
+      right: 0,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          children: [
+            // Switch Camera Button (Left)
+            if (widget.cameras.length > 1)
+              GestureDetector(
+                onTap: switchCamera,
+                child: Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(30),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.3),
+                      width: 2,
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.flip_camera_ios,
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
