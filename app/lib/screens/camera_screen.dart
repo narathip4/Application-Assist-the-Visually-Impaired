@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/fast_vlm_service.dart';
+
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
+  final FastVlmService? vlmService;
 
-  const CameraScreen({Key? key, required this.cameras}) : super(key: key);
+  const CameraScreen({super.key, required this.cameras, this.vlmService});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -19,18 +22,75 @@ class _CameraScreenState extends State<CameraScreen> {
   bool isSwitching = false;
   bool isFlashOn = false;
   bool isSoundEnabled = true;
+  late final FastVlmService _vlmService;
+  bool _isModelLoading = true;
+  bool _isModelReady = false;
+  bool _isProcessingFrame = false;
+  bool _isWarmUpRunning = false;
+  String? _modelError;
+  DateTime? _lastInferenceTime;
+  final Duration _inferenceInterval = const Duration(milliseconds: 900);
+  bool _canRetryWarmUp = true;
   String? errorMessage;
-  String displayText =
-      "Text that text-to-speech will read appears here"; // Text to display
+  String displayText = 'กำลังเตรียมระบบช่วยบรรยายภาพ...';
 
   @override
   void initState() {
     super.initState();
+    _vlmService = widget.vlmService ?? FastVlmService();
+    _warmUpModel();
     _initializeCamera();
   }
 
+  Future<void> _warmUpModel() async {
+    if (_isWarmUpRunning) return;
+    _isWarmUpRunning = true;
+    setState(() {
+      _isModelLoading = true;
+      _isModelReady = false;
+      _modelError = null;
+      displayText = 'กำลังเตรียมโมเดลบรรยายภาพ...';
+      _canRetryWarmUp = true;
+    });
+
+    try {
+      await _vlmService.ensureInitialized();
+      if (!mounted) return;
+      setState(() {
+        _isModelReady = true;
+        displayText = 'พร้อมบรรยายภาพแล้ว';
+        _modelError = null;
+        _canRetryWarmUp = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      final bool shouldRetry = e is! ModelAssetException;
+      setState(() {
+        _isModelReady = false;
+        _modelError = e.toString();
+        displayText = shouldRetry
+            ? 'เกิดข้อผิดพลาดในการเตรียมโมเดล\n$e'
+            : 'ไม่พบไฟล์โมเดล FastVLM\nกรุณาอ่าน README เพื่อตั้งค่าไฟล์ `model.onnx` แล้วเปิดแอปอีกครั้ง';
+        _canRetryWarmUp = shouldRetry;
+      });
+    } finally {
+      _isWarmUpRunning = false;
+      if (mounted) {
+        setState(() {
+          _isModelLoading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _initializeCamera() async {
-    final status = await Permission.camera.request();
+    PermissionStatus status;
+    try {
+      status = await Permission.camera.request();
+    } catch (e) {
+      debugPrint('Permission request failed: $e');
+      status = PermissionStatus.granted;
+    }
     if (!mounted) return;
 
     if (status == PermissionStatus.granted) {
@@ -49,7 +109,17 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
-    await controller?.dispose();
+    if (controller != null) {
+      try {
+        if (controller!.value.isStreamingImages) {
+          await controller!.stopImageStream();
+        }
+      } catch (e) {
+        debugPrint('Error stopping previous image stream: $e');
+      } finally {
+        await controller?.dispose();
+      }
+    }
 
     final newController = CameraController(
       widget.cameras[index],
@@ -64,6 +134,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
       // Reset flash เป็น off ทุกครั้ง
       await newController.setFlashMode(FlashMode.off);
+      await newController.startImageStream(_handleCameraImage);
 
       setState(() {
         controller = newController;
@@ -71,12 +142,17 @@ class _CameraScreenState extends State<CameraScreen> {
         isSwitching = false;
         isFlashOn = false;
         errorMessage = null;
+        _lastInferenceTime = null;
+        _isProcessingFrame = false;
       });
     } catch (e) {
       debugPrint('Error initializing camera: $e');
+      await newController.dispose();
       setState(() {
         isSwitching = false;
         errorMessage = "ไม่สามารถเปิดกล้องได้";
+        _isProcessingFrame = false;
+        _lastInferenceTime = null;
       });
     }
   }
@@ -93,8 +169,61 @@ class _CameraScreenState extends State<CameraScreen> {
     await _setupCamera(currentCameraIndex);
   }
 
+  void _handleCameraImage(CameraImage image) {
+    if (_isModelLoading) {
+      return;
+    }
+
+    if (!_isModelReady) {
+      if (_modelError != null && _canRetryWarmUp && !_isWarmUpRunning) {
+        _warmUpModel();
+      }
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+    if (_isProcessingFrame) {
+      return;
+    }
+    if (_lastInferenceTime != null &&
+        now.difference(_lastInferenceTime!) < _inferenceInterval) {
+      return;
+    }
+
+    _isProcessingFrame = true;
+    if (mounted && !_isModelLoading) {
+      setState(() {
+        displayText = 'กำลังบรรยายภาพ...';
+      });
+    }
+
+    _vlmService
+        .describeCameraImage(image)
+        .then((result) {
+          if (!mounted) return;
+          setState(() {
+            displayText = result;
+            _modelError = null;
+          });
+        })
+        .catchError((error, stack) {
+          debugPrint('FastVLM error: $error');
+          if (!mounted) return;
+          setState(() {
+            _modelError = error.toString();
+            displayText = 'ไม่สามารถประมวลผลภาพได้\n$error';
+          });
+        })
+        .whenComplete(() {
+          _lastInferenceTime = DateTime.now();
+          _isProcessingFrame = false;
+        });
+  }
+
   Future<void> toggleFlash() async {
-    if (controller == null || !controller!.value.isInitialized) return;
+    if (controller == null || !controller!.value.isInitialized) {
+      return;
+    }
 
     try {
       final newMode = isFlashOn ? FlashMode.off : FlashMode.torch;
@@ -108,8 +237,9 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> takePicture() async {
     if (controller == null ||
         !controller!.value.isInitialized ||
-        controller!.value.isTakingPicture)
+        controller!.value.isTakingPicture) {
       return;
+    }
 
     try {
       final image = await controller!.takePicture();
@@ -131,7 +261,19 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
-    controller?.dispose();
+    final currentController = controller;
+    controller = null;
+    if (currentController != null) {
+      try {
+        if (currentController.value.isStreamingImages) {
+          currentController.stopImageStream();
+        }
+      } catch (e) {
+        debugPrint('Error stopping image stream on dispose: $e');
+      }
+      currentController.dispose();
+    }
+    _vlmService.dispose();
     super.dispose();
   }
 
@@ -211,18 +353,55 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Container(
         padding: EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.7),
+          color: Colors.black.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withOpacity(0.3), width: 1),
-        ),
-        child: Text(
-          displayText,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 16,
-            fontWeight: FontWeight.w400,
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.3),
+            width: 1,
           ),
-          textAlign: TextAlign.center,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_isModelLoading || _isProcessingFrame)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: const CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Flexible(
+                      child: Text(
+                        _isModelLoading
+                            ? 'กำลังเตรียมโมเดล...'
+                            : 'กำลังบรรยายภาพ...',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            Text(
+              displayText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w400,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
