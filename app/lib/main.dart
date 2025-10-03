@@ -11,19 +11,13 @@ Future<void> main() async {
   // Simple download
   await ModelLoader.ensureModelsDownloaded();
 
-  // Check if ready
-  if (await ModelLoader.isReady()) {
-    final path = await ModelLoader.getModelPath(
-      'decoder_model_merged_int8.onnx',
-    );
-    print('Model path: $path');
-  }
-
   try {
     cameras = await availableCameras();
   } catch (e) {
     debugPrint('Error initializing cameras: $e');
   }
+
+  testModelFiles();
 
   runApp(const MyApp());
 }

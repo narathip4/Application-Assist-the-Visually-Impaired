@@ -64,14 +64,11 @@ class _CameraScreenState extends State<CameraScreen> {
       });
     } catch (e) {
       if (!mounted) return;
-      final bool shouldRetry = e is! ModelAssetException;
       setState(() {
         _isModelReady = false;
         _modelError = e.toString();
-        displayText = shouldRetry
-            ? 'เกิดข้อผิดพลาดในการเตรียมโมเดล\n$e'
-            : 'ไม่พบไฟล์โมเดล FastVLM\nกรุณาอ่าน README เพื่อตั้งค่าไฟล์ `model.onnx` แล้วเปิดแอปอีกครั้ง';
-        _canRetryWarmUp = shouldRetry;
+        displayText = 'เกิดข้อผิดพลาดในการเตรียมโมเดล\n$e';
+        _canRetryWarmUp = true; // allow retry always
       });
     } finally {
       _isWarmUpRunning = false;

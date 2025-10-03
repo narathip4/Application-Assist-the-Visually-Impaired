@@ -21,9 +21,9 @@ class ModelLoader {
 
   // List of model files required
   static const List<String> _requiredFiles = [
-    "decoder_model_merged_int8.onnx",
-    "embed_tokens_int8.onnx",
-    "vision_encoder_int8.onnx",
+    "decoder_model_merged_fp16.onnx",
+    "embed_tokens_fp16.onnx",
+    "vision_encoder_fp16.onnx",
   ];
 
   // (Optional) File checksums to verify integrity
@@ -117,7 +117,7 @@ class ModelLoader {
           }
         }
 
-        print("✓ Downloaded $fileName (${_formatBytes(downloaded)})");
+        print("âœ“ Downloaded $fileName (${_formatBytes(downloaded)})");
       } catch (e) {
         await sink.close();
         if (await file.exists()) await file.delete();
@@ -126,7 +126,7 @@ class ModelLoader {
     } catch (e) {
       // Retry if failed
       if (retryCount < _maxRetries) {
-        print("⚠ Retry ${retryCount + 1}/$_maxRetries for $fileName: $e");
+        print("âš  Retry ${retryCount + 1}/$_maxRetries for $fileName: $e");
         await Future.delayed(_retryDelay * (retryCount + 1));
         return _downloadFile(
           url,
@@ -157,16 +157,16 @@ class ModelLoader {
       final file = File(filePath);
 
       if (await file.exists() && (await file.length()) > 0) {
-        print("✓ Cached $fileName (${_formatBytes(await file.length())})");
+        print("âœ“ Cached $fileName (${_formatBytes(await file.length())})");
         continue;
       }
 
       final url = "$_repoBaseUrl/$fileName";
-      print("⬇ Downloading $fileName ...");
+      print("â¬‡ Downloading $fileName ...");
       await _downloadFile(url, filePath, onProgress: onProgress);
     }
 
-    print("✓ All models ready!");
+    print("âœ“ All models ready!");
   }
 
   /// Check if all required models exist locally
@@ -191,6 +191,22 @@ class ModelLoader {
     return path;
   }
 
+  /// Get all model file paths as a map
+  static Future<Map<String, String>> getAllModelPaths() async {
+    final dir = await _getModelDir();
+    final paths = <String, String>{};
+
+    for (final fileName in _requiredFiles) {
+      final path = "$dir/$fileName";
+      if (!await File(path).exists()) {
+        throw FileSystemException("Model file not found", path);
+      }
+      paths[fileName] = path;
+    }
+
+    return paths;
+  }
+
   /// Clear all cached models (force re-download next time)
   static Future<void> clearCache() async {
     final dir = await _getModelDir();
@@ -198,7 +214,7 @@ class ModelLoader {
       final file = File("$dir/$f");
       if (await file.exists()) {
         await file.delete();
-        print("✗ Deleted $f");
+        print("âœ— Deleted $f");
       }
     }
   }
@@ -207,5 +223,23 @@ class ModelLoader {
   static Future<void> dispose() async {
     _client?.close();
     _client = null;
+  }
+}
+
+Future<void> testModelFiles() async {
+  final dir = await getApplicationDocumentsDirectory();
+  final modelDir = Directory('${dir.path}/models/FastVLM-0.5B-ONNX');
+
+  if (!modelDir.existsSync()) {
+    print("âŒ Model directory does not exist: ${modelDir.path}");
+    return;
+  }
+
+  final files = modelDir.listSync();
+  print("ðŸ“‚ Model directory: ${modelDir.path}");
+  for (var f in files) {
+    print(
+      " - ${f.path} (${f is File ? (f.lengthSync() / (1024 * 1024)).toStringAsFixed(2) + " MB" : "DIR"})",
+    );
   }
 }

@@ -142,6 +142,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.0.0"
+  flutter_onnxruntime:
+    dependency: "direct main"
+    description:
+      name: flutter_onnxruntime
+      sha256: "70a2c1801bd2d650630ff1e833c73f1b9d09dcd513d0fdf0de6086f37b69f35d"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.2"
   flutter_plugin_android_lifecycle:
     dependency: transitive
     description:
@@ -240,14 +248,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.16.0"
-  onnxruntime:
-    dependency: "direct main"
-    description:
-      name: onnxruntime
-      sha256: e77ec05acafc135cc5fe7bcdf11b101b39f06513c9d5e9fa02cb1929f6bac72a
-      url: "https://pub.dev"
-    source: hosted
-    version: "1.4.1"
   path:
     dependency: transitive
     description:
