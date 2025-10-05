@@ -6,9 +6,11 @@ import '../services/fast_vlm_service.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
-  final FastVlmService? vlmService;
+  // final FastVlmService? vlmService;
 
-  const CameraScreen({super.key, required this.cameras, this.vlmService});
+  const CameraScreen({super.key, required this.cameras});
+
+  // const CameraScreen({super.key, required this.cameras, this.vlmService});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -17,27 +19,33 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? controller;
   int currentCameraIndex = 0;
+
   bool isInitialized = false;
   bool isPermissionGranted = false;
   bool isSwitching = false;
   bool isFlashOn = false;
   bool isSoundEnabled = true;
-  late final FastVlmService _vlmService;
+
+  // late final FastVlmService _vlmService;
+
   bool _isModelLoading = true;
   bool _isModelReady = false;
   bool _isProcessingFrame = false;
   bool _isWarmUpRunning = false;
+  bool _canRetryWarmUp = true;
+
   String? _modelError;
+  String displayText =
+      'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¸£à¸°à¸šà¸šà¸Šà¹ˆà¸§à¸¢à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...';
+  String? errorMessage;
+
   DateTime? _lastInferenceTime;
   final Duration _inferenceInterval = const Duration(milliseconds: 900);
-  bool _canRetryWarmUp = true;
-  String? errorMessage;
-  String displayText = 'กำลังเตรียมระบบช่วยบรรยายภาพ...';
 
   @override
   void initState() {
     super.initState();
-    _vlmService = widget.vlmService ?? FastVlmService();
+    // _vlmService = widget.vlmService ?? FastVlmService();
     _warmUpModel();
     _initializeCamera();
   }
@@ -49,33 +57,31 @@ class _CameraScreenState extends State<CameraScreen> {
       _isModelLoading = true;
       _isModelReady = false;
       _modelError = null;
-      displayText = 'กำลังเตรียมโมเดลบรรยายภาพ...';
+      displayText =
+          'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...';
       _canRetryWarmUp = true;
     });
 
     try {
-      await _vlmService.ensureInitialized();
+      // await _vlmService.ensureInitialized();
       if (!mounted) return;
       setState(() {
         _isModelReady = true;
-        displayText = 'พร้อมบรรยายภาพแล้ว';
+        displayText = 'à¸žà¸£à¹‰à¸­à¸¡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸žà¹à¸¥à¹‰à¸§';
         _modelError = null;
-        _canRetryWarmUp = true;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isModelReady = false;
         _modelError = e.toString();
-        displayText = 'เกิดข้อผิดพลาดในการเตรียมโมเดล\n$e';
-        _canRetryWarmUp = true; // allow retry always
+        displayText =
+            'à¹€à¸à¸´à¸”à¸‚à¹‰à¸­à¸œà¸´à¸”à¸žà¸¥à¸²à¸”à¹ƒà¸™à¸à¸²à¸£à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥\n$e';
       });
     } finally {
       _isWarmUpRunning = false;
       if (mounted) {
-        setState(() {
-          _isModelLoading = false;
-        });
+        setState(() => _isModelLoading = false);
       }
     }
   }
@@ -129,7 +135,6 @@ class _CameraScreenState extends State<CameraScreen> {
       await newController.initialize();
       if (!mounted) return;
 
-      // Reset flash เป็น off ทุกครั้ง
       await newController.setFlashMode(FlashMode.off);
       await newController.startImageStream(_handleCameraImage);
 
@@ -147,7 +152,8 @@ class _CameraScreenState extends State<CameraScreen> {
       await newController.dispose();
       setState(() {
         isSwitching = false;
-        errorMessage = "ไม่สามารถเปิดกล้องได้";
+        errorMessage =
+            "à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¹€à¸›à¸´à¸”à¸à¸¥à¹‰à¸­à¸‡à¹„à¸”à¹‰";
         _isProcessingFrame = false;
         _lastInferenceTime = null;
       });
@@ -166,10 +172,9 @@ class _CameraScreenState extends State<CameraScreen> {
     await _setupCamera(currentCameraIndex);
   }
 
+  // âœ… Fixed: async IIFE, no catchError misuse
   void _handleCameraImage(CameraImage image) {
-    if (_isModelLoading) {
-      return;
-    }
+    if (_isModelLoading) return;
 
     if (!_isModelReady) {
       if (_modelError != null && _canRetryWarmUp && !_isWarmUpRunning) {
@@ -178,10 +183,8 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
 
-    final DateTime now = DateTime.now();
-    if (_isProcessingFrame) {
-      return;
-    }
+    final now = DateTime.now();
+    if (_isProcessingFrame) return;
     if (_lastInferenceTime != null &&
         now.difference(_lastInferenceTime!) < _inferenceInterval) {
       return;
@@ -189,39 +192,36 @@ class _CameraScreenState extends State<CameraScreen> {
 
     _isProcessingFrame = true;
     if (mounted && !_isModelLoading) {
-      setState(() {
-        displayText = 'กำลังบรรยายภาพ...';
-      });
+      setState(
+        () => displayText = 'à¸à¸³à¸¥à¸±à¸‡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...',
+      );
     }
 
-    _vlmService
-        .describeCameraImage(image)
-        .then((result) {
-          if (!mounted) return;
-          setState(() {
-            displayText = result;
-            _modelError = null;
-          });
-        })
-        .catchError((error, stack) {
-          debugPrint('FastVLM error: $error');
-          if (!mounted) return;
-          setState(() {
-            _modelError = error.toString();
-            displayText = 'ไม่สามารถประมวลผลภาพได้\n$error';
-          });
-        })
-        .whenComplete(() {
-          _lastInferenceTime = DateTime.now();
-          _isProcessingFrame = false;
+    () async {
+      try {
+        // final result = await _vlmService.describeCameraImage(image);
+        if (!mounted) return;
+        setState(() {
+          // displayText = result;
+          _modelError = null;
         });
+      } catch (error, stack) {
+        debugPrint('FastVLM error: $error\n$stack');
+        if (!mounted) return;
+        setState(() {
+          _modelError = error.toString();
+          displayText =
+              'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¸ à¸²à¸žà¹„à¸”à¹‰\n$error';
+        });
+      } finally {
+        _lastInferenceTime = DateTime.now();
+        _isProcessingFrame = false;
+      }
+    }();
   }
 
   Future<void> toggleFlash() async {
-    if (controller == null || !controller!.value.isInitialized) {
-      return;
-    }
-
+    if (controller == null || !controller!.value.isInitialized) return;
     try {
       final newMode = isFlashOn ? FlashMode.off : FlashMode.torch;
       await controller!.setFlashMode(newMode);
@@ -237,11 +237,9 @@ class _CameraScreenState extends State<CameraScreen> {
         controller!.value.isTakingPicture) {
       return;
     }
-
     try {
       final image = await controller!.takePicture();
       debugPrint('Picture taken: ${image.path}');
-      // TODO: ส่ง path ไปหน้าอื่นหรือ process ต่อ
     } catch (e) {
       debugPrint('Error taking picture: $e');
     }
@@ -270,7 +268,7 @@ class _CameraScreenState extends State<CameraScreen> {
       }
       currentController.dispose();
     }
-    _vlmService.dispose();
+    // _vlmService.dispose();
     super.dispose();
   }
 
@@ -294,7 +292,6 @@ class _CameraScreenState extends State<CameraScreen> {
   Widget _buildCameraView() {
     return Stack(
       children: [
-        // Camera Preview เต็มจอ
         SizedBox.expand(
           child: FittedBox(
             fit: BoxFit.cover,
@@ -344,11 +341,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Widget _buildTextDisplayBox() {
     return Positioned(
-      bottom: 120, // Position above the bottom controls
+      bottom: 120,
       left: 20,
       right: 20,
       child: Container(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(12),
@@ -366,10 +363,10 @@ class _CameraScreenState extends State<CameraScreen> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    SizedBox(
+                    const SizedBox(
                       width: 18,
                       height: 18,
-                      child: const CircularProgressIndicator(
+                      child: CircularProgressIndicator(
                         strokeWidth: 2,
                         color: Colors.white,
                       ),
@@ -378,8 +375,8 @@ class _CameraScreenState extends State<CameraScreen> {
                     Flexible(
                       child: Text(
                         _isModelLoading
-                            ? 'กำลังเตรียมโมเดล...'
-                            : 'กำลังบรรยายภาพ...',
+                            ? 'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥...'
+                            : 'à¸à¸³à¸¥à¸±à¸‡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...',
                         style: const TextStyle(
                           color: Colors.white70,
                           fontSize: 14,
@@ -459,13 +456,10 @@ class _CameraScreenState extends State<CameraScreen> {
       color: Colors.black,
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-          const SizedBox(height: 16),
-          Text(
-            isSwitching ? 'Switching Camera...' : 'Loading Camera...',
-            style: const TextStyle(color: Colors.white),
-          ),
+        children: const [
+          CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+          SizedBox(height: 16),
+          Text('Loading Camera...', style: TextStyle(color: Colors.white)),
         ],
       ),
     );
@@ -539,15 +533,12 @@ class _CameraScreenState extends State<CameraScreen> {
         width: size,
         height: size,
         decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-        child: iconSize > 0
-            ? Icon(icon, color: color, size: iconSize)
-            : null, // สำหรับ shutter button
+        child: iconSize > 0 ? Icon(icon, color: color, size: iconSize) : null,
       ),
     );
   }
 }
 
-// Painter สำหรับ sight
 class _SightPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -559,17 +550,31 @@ class _SightPainter extends CustomPainter {
     const len = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // มุม
-    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(len, 0), paint);
-    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(0, len), paint);
-    canvas.drawLine(rect.topRight, rect.topRight - Offset(len, 0), paint);
-    canvas.drawLine(rect.topRight, rect.topRight + Offset(0, len), paint);
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + Offset(len, 0), paint);
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft - Offset(0, len), paint);
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(len, 0), paint);
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(0, len), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
+    canvas.drawLine(rect.topRight, rect.topRight - const Offset(len, 0), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, len), paint);
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + const Offset(len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft - const Offset(0, len),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight - const Offset(len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight - const Offset(0, len),
+      paint,
+    );
 
-    // crosshair
     canvas.drawCircle(rect.center, 2, Paint()..color = Colors.white);
   }
 

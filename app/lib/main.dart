@@ -2,22 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'screens/camera_screen.dart';
 import 'services/model_loader.dart';
+import 'services/test_model_loader.dart';
 
 List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Simple download
+  // Ensure model files exist and are correct
   await ModelLoader.ensureModelsDownloaded();
+  await testModelIntegrity();
 
   try {
     cameras = await availableCameras();
   } catch (e) {
     debugPrint('Error initializing cameras: $e');
   }
-
-  testModelFiles();
 
   runApp(const MyApp());
 }

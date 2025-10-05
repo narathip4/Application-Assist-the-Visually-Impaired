@@ -1,245 +1,198 @@
 import 'dart:io';
-import 'dart:async';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:crypto/crypto.dart';
 
-// Callback used to report progress while downloading
-typedef ProgressCallback =
-    void Function(
-      String fileName,
-      int downloadedBytes,
-      int totalBytes,
-      double percentage,
-    );
-
-// Loader for downloading & caching ONNX models
 class ModelLoader {
-  // Hugging Face repo where ONNX models are stored
-  static const String _repoBaseUrl =
-      "https://huggingface.co/onnx-community/FastVLM-0.5B-ONNX/resolve/main/onnx";
+  static const String _repo = 'onnx-community/FastVLM-0.5B-ONNX';
+  static const String _base = 'https://huggingface.co';
 
-  // List of model files required
-  static const List<String> _requiredFiles = [
-    "decoder_model_merged_fp16.onnx",
-    "embed_tokens_fp16.onnx",
-    "vision_encoder_fp16.onnx",
-  ];
+  /// FP16 model + config files
+  static const Map<String, String> _fp16 = {
+    // ONNX models
+    'vision_encoder_fp16.onnx':
+        '$_base/$_repo/resolve/main/onnx/vision_encoder_fp16.onnx?download=true',
+    'embed_tokens_fp16.onnx':
+        '$_base/$_repo/resolve/main/onnx/embed_tokens_fp16.onnx?download=true',
+    'decoder_model_merged_fp16.onnx':
+        '$_base/$_repo/resolve/main/onnx/decoder_model_merged_fp16.onnx?download=true',
 
-  // (Optional) File checksums to verify integrity
-  static const Map<String, String>? _checksums = null;
+    // Tokenizer + configs
+    'tokenizer.json': '$_base/$_repo/resolve/main/tokenizer.json?download=true',
+    'preprocessor_config.json':
+        '$_base/$_repo/resolve/main/preprocessor_config.json?download=true',
+    'special_tokens_map.json':
+        '$_base/$_repo/resolve/main/special_tokens_map.json?download=true',
+    'generation_config.json':
+        '$_base/$_repo/resolve/main/generation_config.json?download=true',
+    'tokenizer_config.json':
+        '$_base/$_repo/resolve/main/tokenizer_config.json?download=true',
+  };
 
-  // Retry & timeout settings
-  static const int _maxRetries = 3;
-  static const Duration _timeout = Duration(minutes: 30);
-  static const Duration _retryDelay = Duration(seconds: 3);
-  static const int _chunkSize = 8192; // 8 KB
+  /// Minimum expected file sizes (MB)
+  static const Map<String, int> _minSizeMB = {
+    'vision_encoder_fp16.onnx': 220, // real ≈241 MB
+    'embed_tokens_fp16.onnx': 0, // small but needed
+    'decoder_model_merged_fp16.onnx': 50, // ≈54 MB
+    'tokenizer.json': 8,
+  };
 
-  static http.Client? _client;
+  static const String _folder = 'models/FastVLM-0.5B-ONNX';
 
-  // Return app's local folder where models will be stored
-  static Future<String> _getModelDir() async {
-    final base = await getApplicationDocumentsDirectory();
-    final dir = Directory("${base.path}/models/FastVLM-0.5B-ONNX");
+  /// Ensures all models and configs are present and valid.
+  static Future<void> ensureModelsDownloaded() async {
+    final dir = await _targetDir();
     if (!await dir.exists()) await dir.create(recursive: true);
-    return dir.path;
-  }
 
-  // Format size to human-readable string
-  static String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
-  }
-
-  // Download a single model file with retries
-  static Future<void> _downloadFile(
-    String url,
-    String filePath, {
-    ProgressCallback? onProgress,
-    int retryCount = 0,
-  }) async {
-    final fileName = url.split('/').last;
-    _client ??= http.Client();
-
-    try {
-      final response = await _client!
-          .send(http.Request('GET', Uri.parse(url)))
-          .timeout(_timeout);
-
-      if (response.statusCode != 200) {
-        throw HttpException("HTTP ${response.statusCode}", uri: Uri.parse(url));
-      }
-
-      final total = response.contentLength ?? 0;
-      int downloaded = 0;
-
-      final file = File(filePath);
-      final sink = file.openWrite();
-
-      try {
-        await for (final chunk in response.stream) {
-          // Write in chunks
-          for (int i = 0; i < chunk.length; i += _chunkSize) {
-            final end = (i + _chunkSize < chunk.length)
-                ? i + _chunkSize
-                : chunk.length;
-            sink.add(chunk.sublist(i, end));
-            downloaded += (end - i);
-
-            // Report progress
-            onProgress?.call(
-              fileName,
-              downloaded,
-              total,
-              total > 0 ? (downloaded / total * 100) : 0,
-            );
-          }
-        }
-
-        await sink.flush();
-        await sink.close();
-
-        // Verify file size
-        if (total > 0 && (await file.length()) != total) {
-          throw Exception("File size mismatch for $fileName");
-        }
-
-        // Verify checksum if provided
-        if (_checksums != null && _checksums!.containsKey(fileName)) {
-          final ok = await _verifyChecksum(filePath, _checksums![fileName]!);
-          if (!ok) {
-            await file.delete();
-            throw Exception("Checksum failed for $fileName");
-          }
-        }
-
-        print("âœ“ Downloaded $fileName (${_formatBytes(downloaded)})");
-      } catch (e) {
-        await sink.close();
-        if (await file.exists()) await file.delete();
-        rethrow;
-      }
-    } catch (e) {
-      // Retry if failed
-      if (retryCount < _maxRetries) {
-        print("âš  Retry ${retryCount + 1}/$_maxRetries for $fileName: $e");
-        await Future.delayed(_retryDelay * (retryCount + 1));
-        return _downloadFile(
-          url,
-          filePath,
-          onProgress: onProgress,
-          retryCount: retryCount + 1,
-        );
-      }
-      rethrow;
+    for (final e in _fp16.entries) {
+      await _ensureOne(e.key, e.value);
     }
   }
 
-  /// Verify checksum of a file
-  static Future<bool> _verifyChecksum(String filePath, String expected) async {
-    final file = File(filePath);
-    final digest = sha256.convert(await file.readAsBytes()).toString();
-    return digest == expected;
-  }
-
-  /// Ensure all model files are downloaded (skip if already cached)
-  static Future<void> ensureModelsDownloaded({
-    ProgressCallback? onProgress,
-  }) async {
-    final dir = await _getModelDir();
-
-    for (final fileName in _requiredFiles) {
-      final filePath = "$dir/$fileName";
-      final file = File(filePath);
-
-      if (await file.exists() && (await file.length()) > 0) {
-        print("âœ“ Cached $fileName (${_formatBytes(await file.length())})");
-        continue;
-      }
-
-      final url = "$_repoBaseUrl/$fileName";
-      print("â¬‡ Downloading $fileName ...");
-      await _downloadFile(url, filePath, onProgress: onProgress);
-    }
-
-    print("âœ“ All models ready!");
-  }
-
-  /// Check if all required models exist locally
-  static Future<bool> isReady() async {
-    final dir = await _getModelDir();
-    for (final f in _requiredFiles) {
-      final file = File("$dir/$f");
-      if (!await file.exists() || (await file.length()) == 0) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /// Get local path of a model file
-  static Future<String> getModelPath(String fileName) async {
-    final dir = await _getModelDir();
-    final path = "$dir/$fileName";
-    if (!await File(path).exists()) {
-      throw FileSystemException("Model not found", path);
-    }
-    return path;
-  }
-
-  /// Get all model file paths as a map
+  /// Returns all file paths.
   static Future<Map<String, String>> getAllModelPaths() async {
-    final dir = await _getModelDir();
-    final paths = <String, String>{};
+    final dir = await _targetDir();
+    final out = <String, String>{};
 
-    for (final fileName in _requiredFiles) {
-      final path = "$dir/$fileName";
-      if (!await File(path).exists()) {
-        throw FileSystemException("Model file not found", path);
+    for (final name in _fp16.keys) {
+      final f = File(p.join(dir.path, name));
+      if (!await _isValid(name, f)) {
+        throw FileSystemException('Model file not found or invalid', f.path);
       }
-      paths[fileName] = path;
+      out[name] = f.path;
     }
-
-    return paths;
+    return out;
   }
 
-  /// Clear all cached models (force re-download next time)
-  static Future<void> clearCache() async {
-    final dir = await _getModelDir();
-    for (final f in _requiredFiles) {
-      final file = File("$dir/$f");
-      if (await file.exists()) {
+  /// Debug helper: print all cached files.
+  static Future<void> printInventory() async {
+    final dir = await _targetDir();
+    _log('📂 Model directory: ${dir.path}');
+    if (!await dir.exists()) return;
+
+    final entries = await dir.list().where((e) => e is File).toList();
+    entries.sort((a, b) => a.path.compareTo(b.path));
+
+    for (final e in entries) {
+      final len = await (e as File).length();
+      _log(' - ${e.path} (${_mb(len)} MB)');
+    }
+  }
+
+  static Future<Directory> _targetDir() async {
+    final base = await getApplicationDocumentsDirectory();
+    return Directory(p.join(base.path, _folder));
+  }
+
+  static Future<void> _ensureOne(String name, String url) async {
+    final dir = await _targetDir();
+    final file = File(p.join(dir.path, name));
+
+    if (await _isValid(name, file)) {
+      _log('√ Cached $name (${_mb(await file.length())} MB)');
+      return;
+    }
+
+    await file.parent.create(recursive: true);
+    await _downloadWithChecks(url, file, name);
+
+    // Final validation
+    if (!await _isValid(name, file)) {
+      try {
         await file.delete();
-        print("âœ— Deleted $f");
+      } catch (_) {}
+      throw HttpException('Downloaded $name but validation failed.');
+    }
+    _log('√ Cached $name (${_mb(await file.length())} MB)');
+  }
+
+  static Future<bool> _isValid(String name, File f) async {
+    try {
+      if (!await f.exists()) return false;
+      final bytes = await f.length();
+      final minMB = _minSizeMB[name];
+      if (minMB != null && bytes < minMB * 1024 * 1024) return false;
+
+      // sanity: detect HTML pages instead of binary
+      final raf = await f.open();
+      final n = await raf.length();
+      final head = await raf.read(n >= 512 ? 512 : n);
+      await raf.close();
+      final s = String.fromCharCodes(head);
+      if (s.contains('<!DOCTYPE') ||
+          s.contains('<html') ||
+          s.contains('error') ||
+          s.contains('Cloudflare'))
+        return false;
+
+      return bytes > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> _downloadWithChecks(
+    String url,
+    File dest,
+    String name,
+  ) async {
+    const maxRetries = 4;
+
+    for (int i = 1; i <= maxRetries; i++) {
+      final tmp = File('${dest.path}.part');
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+      try {
+        if (await dest.exists()) await dest.delete();
+      } catch (_) {}
+
+      _log('⬇ Downloading $name (attempt $i/$maxRetries)...');
+
+      final client = http.Client();
+      try {
+        final req = http.Request('GET', Uri.parse(url))
+          ..followRedirects = true
+          ..headers.addAll({
+            'accept': 'application/octet-stream',
+            'user-agent': 'flutter-app/onnx-downloader',
+          });
+
+        final resp = await client
+            .send(req)
+            .timeout(const Duration(minutes: 20));
+
+        if (resp.statusCode != 200) {
+          await resp.stream.drain();
+          throw HttpException('HTTP ${resp.statusCode}');
+        }
+
+        final sink = tmp.openWrite();
+        await resp.stream.listen(sink.add).asFuture();
+        await sink.close();
+
+        final ct = (resp.headers['content-type'] ?? '').toLowerCase();
+        if (ct.contains('text/html')) {
+          throw const HttpException('Got HTML instead of binary');
+        }
+
+        await tmp.rename(dest.path);
+
+        if (await _isValid(name, dest)) return; // success
+        throw const HttpException('Post-download validation failed');
+      } catch (e) {
+        _log('⚠️ Download error for $name: $e');
+        try {
+          if (await tmp.exists()) await tmp.delete();
+        } catch (_) {}
+        await Future.delayed(Duration(milliseconds: 400 * i));
+        if (i == maxRetries) rethrow;
+      } finally {
+        client.close();
       }
     }
   }
 
-  /// Dispose HTTP client
-  static Future<void> dispose() async {
-    _client?.close();
-    _client = null;
-  }
-}
-
-Future<void> testModelFiles() async {
-  final dir = await getApplicationDocumentsDirectory();
-  final modelDir = Directory('${dir.path}/models/FastVLM-0.5B-ONNX');
-
-  if (!modelDir.existsSync()) {
-    print("âŒ Model directory does not exist: ${modelDir.path}");
-    return;
-  }
-
-  final files = modelDir.listSync();
-  print("ðŸ“‚ Model directory: ${modelDir.path}");
-  for (var f in files) {
-    print(
-      " - ${f.path} (${f is File ? (f.lengthSync() / (1024 * 1024)).toStringAsFixed(2) + " MB" : "DIR"})",
-    );
-  }
+  static String _mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(2);
+  static void _log(Object o) => print(o);
 }
