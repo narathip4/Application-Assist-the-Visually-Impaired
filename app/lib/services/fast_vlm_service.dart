@@ -1,255 +1,387 @@
-// import 'dart:async';
-// import 'dart:typed_data';
-// import 'package:camera/camera.dart';
-// import 'package:image/image.dart' as img;
-// import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:image/image.dart' as img;
+import 'package:camera/camera.dart';
+import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'package:flutter/foundation.dart';
 
-// import 'model_loader.dart';
+import 'model_loader.dart';
 
-// class FastVlmService {
-//   OrtSession? _visionSession;
-//   OrtSession? _embedSession;
-//   OrtSession? _decoderSession;
-//   Completer<void>? _initCompleter;
+class FastVlmService {
+  OrtSession? _visionSession;
+  OrtSession? _embedSession;
+  OrtSession? _decoderSession;
+  Completer<void>? _initCompleter;
 
-//   bool get isReady =>
-//       _visionSession != null &&
-//       _embedSession != null &&
-//       _decoderSession != null;
+  bool get isReady =>
+      _visionSession != null &&
+      _embedSession != null &&
+      _decoderSession != null;
 
-//   Future<void> ensureInitialized() async {
-//     if (isReady) return;
-//     if (_initCompleter != null) return _initCompleter!.future;
+  Future<void> ensureInitialized() async {
+    if (isReady) return;
+    if (_initCompleter != null) return _initCompleter!.future;
 
-//     final c = _initCompleter = Completer<void>();
-//     try {
-//       // 1) à¹ƒà¸«à¹‰ model_loader à¸”à¸²à¸§à¸™à¹Œà¹‚à¸«à¸¥à¸”+à¸„à¸·à¸™à¸žà¸²à¸˜à¹ƒà¸«à¹‰à¸„à¸£à¸š (FP16)
-//       await ModelLoader.ensureModelsDownloaded();
-//       final paths = await ModelLoader.getAllModelPaths();
+    final c = _initCompleter = Completer<void>();
+    try {
+      await ModelLoader.ensureModelsDownloaded();
+      final paths = await ModelLoader.getAllModelPaths();
 
-//       final ort =
-//           OnnxRuntime(); // ORT 1.22.0 (à¸œà¹ˆà¸²à¸™ flutter_onnxruntime â‰¥1.5.1)
+      final ort = OnnxRuntime();
+      _visionSession = await ort.createSession(
+        paths['vision_encoder_fp16.onnx']!,
+      );
+      _embedSession = await ort.createSession(paths['embed_tokens_fp16.onnx']!);
+      _decoderSession = await ort.createSession(
+        paths['decoder_model_merged_fp16.onnx']!,
+      );
 
-//       _visionSession = await ort.createSession(
-//         paths['vision_encoder_fp16.onnx']!,
-//       );
-//       _embedSession = await ort.createSession(paths['embed_tokens_fp16.onnx']!);
-//       _decoderSession = await ort.createSession(
-//         paths['decoder_model_merged_fp16.onnx']!,
-//       );
+      debugPrint('✅ FastVLM models loaded successfully');
+      c.complete();
+    } catch (e, st) {
+      debugPrint('❌ FastVLM initialization error: $e');
+      c.completeError(e, st);
+      rethrow;
+    } finally {
+      _initCompleter = null;
+    }
+  }
 
-//       c.complete();
-//     } catch (e, st) {
-//       c.completeError(e, st);
-//       rethrow;
-//     } finally {
-//       _initCompleter = null;
-//     }
-//   }
+  Future<String> describeCameraImage(
+    CameraImage frame, {
+    String prompt = "Describe this image for a visually impaired person:",
+  }) async {
+    await ensureInitialized();
+    if (!isReady) throw StateError('FastVLM not ready');
 
-//   /// à¸£à¸±à¸™à¸„à¸£à¸š pipeline à¹€à¸žà¸·à¹ˆà¸­à¸¢à¸·à¸™à¸¢à¸±à¸™à¸§à¹ˆà¸²à¹‚à¸¡à¹€à¸”à¸¥à¸—à¸³à¸‡à¸²à¸™à¸ˆà¸£à¸´à¸‡
-//   /// (à¸¢à¸±à¸‡à¹„à¸¡à¹ˆà¸–à¸­à¸”à¸£à¸«à¸±à¸ª token à¹€à¸›à¹‡à¸™à¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡)
-//   Future<String> describeCameraImage(
-//     CameraImage frame, {
-//     String prompt = "Describe scene in Thai",
-//   }) async {
-//     await ensureInitialized();
-//     if (!isReady) throw StateError('FastVLM not ready');
+    // Preprocess frame
+    final pre = _preprocess(
+      image: frame,
+      targetSize: 384,
+      mean: const [0.48145466, 0.4578275, 0.40821073],
+      std: const [0.26862954, 0.26130258, 0.27577711],
+      prompt: prompt,
+    );
 
-//     // preprocess
-//     final pre = _preprocess(
-//       image: frame,
-//       targetSize: 384,
-//       mean: const [0.48145466, 0.4578275, 0.40821073],
-//       std: const [0.26862954, 0.26130258, 0.27577711],
-//       prompt: prompt,
-//     );
+    OrtValue? pixelTensor;
+    OrtValue? idsTensor;
+    OrtValue? inputsEmbedsTensor;
+    OrtValue? attentionMaskTensor;
+    OrtValue? positionIdsTensor;
 
-//     OrtValue? pixelTensor;
-//     OrtValue? idsTensor;
-//     OrtValue? maskTensor;
+    Map<String, OrtValue>? vOut;
+    Map<String, OrtValue>? eOut;
+    Map<String, OrtValue>? dOut;
 
-//     Map<String, OrtValue>? vOut;
-//     Map<String, OrtValue>? eOut;
-//     Map<String, OrtValue>? dOut;
+    try {
+      // 1) Vision encoder
+      pixelTensor = await OrtValue.fromList(pre.imageTensor, [1, 3, 384, 384]);
+      vOut = await _visionSession!.run({'pixel_values': pixelTensor});
+      final visionOutput = vOut.values.first;
 
-//     try {
-//       // FP16 à¹‚à¸¡à¹€à¸”à¸¥à¸ªà¹ˆà¸§à¸™à¹ƒà¸«à¸à¹ˆà¸£à¸±à¸š input float32 à¹„à¸”à¹‰ (weights à¹€à¸›à¹‡à¸™ fp16 à¸ à¸²à¸¢à¹ƒà¸™)
-//       pixelTensor = await OrtValue.fromList(pre.imageTensor, [1, 3, 384, 384]);
-//       idsTensor = await OrtValue.fromList(pre.inputIds!, [
-//         1,
-//         pre.sequenceLength!,
-//       ]);
-//       maskTensor = await OrtValue.fromList(pre.attentionMask!, [
-//         1,
-//         pre.sequenceLength!,
-//       ]);
+      // 2) Text embeddings
+      idsTensor = await OrtValue.fromList(pre.inputIds!, [
+        1,
+        pre.inputIds!.length,
+      ]);
+      eOut = await _embedSession!.run({'input_ids': idsTensor});
+      final textEmbeddings = eOut.values.first;
 
-//       // 1) vision encoder
-//       vOut = await _visionSession!.run({'pixel_values': pixelTensor});
-//       final enc = vOut.values.first;
+      // 3) Combine vision and text embeddings
+      final combined = await _combineEmbeddings(visionOutput, textEmbeddings);
+      final totalSeqLen = combined.seqLength;
 
-//       // 2) embed prompt
-//       eOut = await _embedSession!.run({'input_ids': idsTensor});
-//       final emb = eOut.values.first;
+      debugPrint(
+        '📊 Combined seq_len: $totalSeqLen, hidden_size: ${combined.hiddenSize}',
+      );
 
-//       // 3) decoder
-//       dOut = await _decoderSession!.run({
-//         'encoder_hidden_states': enc,
-//         'input_embeddings': emb,
-//         'attention_mask': maskTensor,
-//       });
+      // 4) Create inputs for decoder
+      inputsEmbedsTensor = await OrtValue.fromList(combined.data, [
+        1,
+        totalSeqLen,
+        combined.hiddenSize,
+      ]);
 
-//       // à¸£à¸²à¸¢à¸‡à¸²à¸™à¸ªà¸£à¸¸à¸› (à¸ªà¸³à¸«à¸£à¸±à¸šà¹€à¸Šà¹‡à¸à¸§à¹ˆà¸²à¹‚à¸¡à¹€à¸”à¸¥à¸§à¸´à¹ˆà¸‡à¸ˆà¸£à¸´à¸‡)
-//       String shape(OrtValue v) => v.shape?.join('x') ?? '?';
-//       final visionShape = shape(vOut.values.first);
-//       final embedShape = shape(eOut.values.first);
-//       final decKey = dOut.keys.isNotEmpty ? dOut.keys.first : 'output';
-//       final decShape = shape(dOut.values.first);
+      // Attention mask: all 1s
+      final attentionMask = Int64List(totalSeqLen);
+      for (int i = 0; i < totalSeqLen; i++) {
+        attentionMask[i] = 1;
+      }
+      attentionMaskTensor = await OrtValue.fromList(attentionMask, [
+        1,
+        totalSeqLen,
+      ]);
 
-//       return 'âœ… Inference OK\n'
-//           '- vision: $visionShape\n'
-//           '- embed:  $embedShape\n'
-//           '- $decKey: $decShape\n'
-//           '(*à¸¢à¸±à¸‡à¹„à¸¡à¹ˆà¸–à¸­à¸”à¸£à¸«à¸±à¸ª token â†’ à¸‚à¹‰à¸­à¸„à¸§à¸²à¸¡)';
-//     } finally {
-//       // cleanup inputs
-//       await pixelTensor?.dispose();
-//       await idsTensor?.dispose();
-//       await maskTensor?.dispose();
+      // Position IDs: [0, 1, 2, ..., totalSeqLen-1]
+      final positionIds = Int64List(totalSeqLen);
+      for (int i = 0; i < totalSeqLen; i++) {
+        positionIds[i] = i;
+      }
+      positionIdsTensor = await OrtValue.fromList(positionIds, [
+        1,
+        totalSeqLen,
+      ]);
 
-//       // cleanup outputs
-//       Future<void> disposeMap(Map<String, OrtValue>? m) async {
-//         if (m == null) return;
-//         for (final v in m.values) {
-//           await v.dispose();
-//         }
-//       }
+      // 5) Build decoder inputs with past_key_values
+      final decoderInputs = <String, OrtValue>{
+        'inputs_embeds': inputsEmbedsTensor,
+        'attention_mask': attentionMaskTensor,
+        'position_ids': positionIdsTensor,
+      };
 
-//       await disposeMap(vOut);
-//       await disposeMap(eOut);
-//       await disposeMap(dOut);
-//     }
-//   }
+      // Initialize empty past_key_values for 18 decoder layers
+      // Shape: [batch_size, num_heads, 0, head_dim] for initial run
+      for (int i = 0; i < 18; i++) {
+        final emptyKV = Float32List(0);
+        decoderInputs['past_key_values.$i.key'] = await OrtValue.fromList(
+          emptyKV,
+          [1, 8, 0, 96], // num_heads=8, head_dim=96 for 0.5B model
+        );
+        decoderInputs['past_key_values.$i.value'] = await OrtValue.fromList(
+          emptyKV,
+          [1, 8, 0, 96],
+        );
+      }
 
-//   Future<void> dispose() async {
-//     await _visionSession?.close();
-//     await _embedSession?.close();
-//     await _decoderSession?.close();
-//     _visionSession = _embedSession = _decoderSession = null;
-//   }
+      // 6) Run decoder
+      dOut = await _decoderSession!.run(decoderInputs);
 
-//   // ---------- Preprocess ----------
+      // 7) Process output
+      final logitsValue = dOut['logits'];
+      if (logitsValue == null) {
+        return 'No logits output from decoder';
+      }
 
-//   _PreprocessResult _preprocess({
-//     required CameraImage image,
-//     required int targetSize,
-//     required List<double> mean,
-//     required List<double> std,
-//     required String prompt,
-//   }) {
-//     final rgb = _yuv420ToRgb(image);
-//     final resized = img.copyResize(
-//       rgb,
-//       width: targetSize,
-//       height: targetSize,
-//       interpolation: img.Interpolation.cubic,
-//     );
-//     final Float32List pixels = _normalize(resized, mean, std);
+      debugPrint('✅ Decoder output shape: ${logitsValue.shape}');
 
-//     // NOTE: à¸¢à¸±à¸‡à¹„à¸¡à¹ˆà¸¡à¸µ tokenizer à¸ˆà¸£à¸´à¸‡ â€” à¸ªà¸£à¹‰à¸²à¸‡ input ids à¸«à¸¥à¸­à¸à¹€à¸žà¸·à¹ˆà¸­à¹ƒà¸«à¹‰à¸à¸£à¸²à¸Ÿà¸£à¸±à¸™à¹„à¸”à¹‰
-//     final toks = prompt.trim().split(RegExp(r'\s+'));
-//     final ids = Int64List(toks.length);
-//     final mask = Int64List(toks.length);
-//     for (int i = 0; i < toks.length; i++) {
-//       ids[i] = i + 1; // placeholder
-//       mask[i] = 1;
-//     }
+      // For now, return success message with shapes
+      // TODO: Implement proper token decoding
+      return _decodeOutput(logitsValue, prompt);
+    } catch (e, st) {
+      debugPrint('❌ Inference error: $e\n$st');
+      rethrow;
+    } finally {
+      // Cleanup
+      await pixelTensor?.dispose();
+      await idsTensor?.dispose();
+      await inputsEmbedsTensor?.dispose();
+      await attentionMaskTensor?.dispose();
+      await positionIdsTensor?.dispose();
 
-//     return _PreprocessResult(
-//       imageTensor: pixels,
-//       inputIds: ids,
-//       attentionMask: mask,
-//     );
-//   }
+      Future<void> disposeMap(Map<String, OrtValue>? m) async {
+        if (m == null) return;
+        for (final v in m.values) {
+          await v.dispose();
+        }
+      }
 
-//   img.Image _yuv420ToRgb(CameraImage image) {
-//     final w = image.width, h = image.height;
-//     final out = img.Image(width: w, height: h);
+      await disposeMap(vOut);
+      await disposeMap(eOut);
+      await disposeMap(dOut);
+    }
+  }
 
-//     final y = image.planes[0];
-//     final u = image.planes[1];
-//     final v = image.planes[2];
+  // Combine vision and text embeddings
+  Future<_CombinedEmbeddings> _combineEmbeddings(
+    OrtValue visionOutput,
+    OrtValue textOutput,
+  ) async {
+    final visionShape = visionOutput.shape!;
+    final textShape = textOutput.shape!;
 
-//     final yRow = y.bytesPerRow;
-//     final uvRow = u.bytesPerRow;
-//     final uvPix = u.bytesPerPixel!;
+    final visionSeqLen = visionShape[1];
+    final textSeqLen = textShape[1];
+    final hiddenSize = visionShape[2];
 
-//     for (int row = 0; row < h; row++) {
-//       for (int col = 0; col < w; col++) {
-//         final uvIndex = uvPix * (col ~/ 2) + uvRow * (row ~/ 2);
-//         final yp = y.bytes[row * yRow + col].toDouble();
-//         final up = u.bytes[uvIndex].toDouble();
-//         final vp = v.bytes[uvIndex].toDouble();
+    final totalSeqLen = visionSeqLen + textSeqLen;
 
-//         int r = (yp + 1.402 * (vp - 128)).round();
-//         int g = (yp - 0.344136 * (up - 128) - 0.714136 * (vp - 128)).round();
-//         int b = (yp + 1.772 * (up - 128)).round();
+    // Extract data from OrtValue - try multiple methods
+    final visionRaw = _extractFloat32Data(visionOutput);
+    final textRaw = _extractFloat32Data(textOutput);
 
-//         if (r < 0)
-//           r = 0;
-//         else if (r > 255)
-//           r = 255;
-//         if (g < 0)
-//           g = 0;
-//         else if (g > 255)
-//           g = 255;
-//         if (b < 0)
-//           b = 0;
-//         else if (b > 255)
-//           b = 255;
+    debugPrint(
+      '🔍 Vision data length: ${visionRaw.length}, expected: ${visionSeqLen * hiddenSize}',
+    );
+    debugPrint(
+      '🔍 Text data length: ${textRaw.length}, expected: ${textSeqLen * hiddenSize}',
+    );
 
-//         out.setPixelRgb(col, row, r, g, b);
-//       }
-//     }
-//     return out;
-//   }
+    // Combine the flattened arrays
+    final combined = Float32List(totalSeqLen * hiddenSize);
 
-//   Float32List _normalize(img.Image im, List<double> mean, List<double> std) {
-//     final w = im.width, h = im.height;
-//     final buf = Float32List(w * h * 3);
+    // Copy vision embeddings
+    combined.setRange(0, visionRaw.length, visionRaw);
 
-//     // CHW
-//     int rOff = 0;
-//     int gOff = w * h;
-//     int bOff = w * h * 2;
+    // Copy text embeddings after vision embeddings
+    combined.setRange(visionRaw.length, combined.length, textRaw);
 
-//     for (int y = 0; y < h; y++) {
-//       for (int x = 0; x < w; x++) {
-//         final p = im.getPixel(x, y);
-//         final r = p.rNormalized.toDouble();
-//         final g = p.gNormalized.toDouble();
-//         final b = p.bNormalized.toDouble();
+    debugPrint(
+      '✅ Combined embeddings: vision=${visionRaw.length}, text=${textRaw.length}, total=${combined.length}',
+    );
 
-//         buf[rOff++] = (r - mean[0]) / std[0];
-//         buf[gOff++] = (g - mean[1]) / std[1];
-//         buf[bOff++] = (b - mean[2]) / std[2];
-//       }
-//     }
-//     return buf;
-//   }
-// }
+    return _CombinedEmbeddings(
+      data: combined,
+      seqLength: totalSeqLen,
+      hiddenSize: hiddenSize,
+    );
+  }
 
-// class _PreprocessResult {
-//   const _PreprocessResult({
-//     required this.imageTensor,
-//     this.inputIds,
-//     this.attentionMask,
-//   });
+  // Extract Float32List from OrtValue (handles different API versions)
+  Float32List _extractFloat32Data(OrtValue ortValue) {
+    try {
+      // Method 1: Direct cast (some versions)
+      final data = ortValue as Float32List;
+      return data;
+    } catch (_) {
+      try {
+        // Method 2: Check if it has a 'data' property
+        final dynamic value = ortValue;
+        if (value.data != null) {
+          return value.data as Float32List;
+        }
+      } catch (_) {}
 
-//   final Float32List imageTensor;
-//   final Int64List? inputIds;
-//   final Int64List? attentionMask;
+      try {
+        // Method 3: Try toList and convert
+        final dynamic value = ortValue;
+        final list = value.toList();
+        if (list is List<double>) {
+          return Float32List.fromList(list);
+        } else if (list is List) {
+          // Flatten nested list
+          final flattened = <double>[];
+          _flattenList(list, flattened);
+          return Float32List.fromList(flattened);
+        }
+      } catch (_) {}
 
-//   int? get sequenceLength => inputIds?.length;
-// }
+      throw UnsupportedError(
+        'Could not extract Float32List from OrtValue. '
+        'Type: ${ortValue.runtimeType}. '
+        'Please check flutter_onnxruntime documentation for your version.',
+      );
+    }
+  }
+
+  // Helper to flatten nested lists
+  void _flattenList(List list, List<double> output) {
+    for (final item in list) {
+      if (item is List) {
+        _flattenList(item, output);
+      } else if (item is num) {
+        output.add(item.toDouble());
+      }
+    }
+  }
+
+  // Decode output (placeholder for now)
+  String _decodeOutput(OrtValue logitsValue, String prompt) {
+    final shape = logitsValue.shape;
+
+    // TODO: Implement proper tokenizer and decoding
+    // For now, return a useful placeholder
+    return 'Scene analysis:\n'
+        '• Model processed image successfully\n'
+        '• Output shape: ${shape?.join('x')}\n'
+        '• Prompt: $prompt\n\n'
+        'Note: Full text decoding coming soon...';
+  }
+
+  Future<void> dispose() async {
+    await _visionSession?.close();
+    await _embedSession?.close();
+    await _decoderSession?.close();
+    _visionSession = _embedSession = _decoderSession = null;
+  }
+
+  // ---------- Preprocess ----------
+  _PreprocessResult _preprocess({
+    required CameraImage image,
+    required int targetSize,
+    required List<double> mean,
+    required List<double> std,
+    required String prompt,
+  }) {
+    final rgb = _yuv420ToRgb(image);
+    final resized = img.copyResize(
+      rgb,
+      width: targetSize,
+      height: targetSize,
+      interpolation: img.Interpolation.cubic,
+    );
+    final Float32List pixels = _normalize(resized, mean, std);
+
+    // Simple tokenization (replace with real tokenizer later)
+    final toks = prompt.trim().split(RegExp(r'\s+'));
+    final ids = Int64List(toks.length);
+    for (int i = 0; i < toks.length; i++) {
+      ids[i] = 100 + i; // Placeholder token IDs
+    }
+
+    return _PreprocessResult(imageTensor: pixels, inputIds: ids);
+  }
+
+  img.Image _yuv420ToRgb(CameraImage image) {
+    final w = image.width, h = image.height;
+    final out = img.Image(width: w, height: h);
+
+    final y = image.planes[0];
+    final u = image.planes[1];
+    final v = image.planes[2];
+
+    final yRow = y.bytesPerRow;
+    final uvRow = u.bytesPerRow;
+    final uvPix = u.bytesPerPixel!;
+
+    for (int row = 0; row < h; row++) {
+      for (int col = 0; col < w; col++) {
+        final uvIndex = uvPix * (col ~/ 2) + uvRow * (row ~/ 2);
+        final yp = y.bytes[row * yRow + col].toDouble();
+        final up = u.bytes[uvIndex].toDouble();
+        final vp = v.bytes[uvIndex].toDouble();
+
+        int r = (yp + 1.402 * (vp - 128)).round().clamp(0, 255);
+        int g = (yp - 0.344136 * (up - 128) - 0.714136 * (vp - 128))
+            .round()
+            .clamp(0, 255);
+        int b = (yp + 1.772 * (up - 128)).round().clamp(0, 255);
+
+        out.setPixelRgb(col, row, r, g, b);
+      }
+    }
+    return out;
+  }
+
+  Float32List _normalize(img.Image im, List<double> mean, List<double> std) {
+    final w = im.width, h = im.height;
+    final out = Float32List(3 * h * w);
+    int i = 0;
+
+    for (final p in im) {
+      out[i++] = (p.rNormalized - mean[0]) / std[0];
+      out[i++] = (p.gNormalized - mean[1]) / std[1];
+      out[i++] = (p.bNormalized - mean[2]) / std[2];
+    }
+
+    return out;
+  }
+}
+
+class _PreprocessResult {
+  final Float32List imageTensor;
+  final Int64List? inputIds;
+
+  _PreprocessResult({required this.imageTensor, this.inputIds});
+}
+
+class _CombinedEmbeddings {
+  final Float32List data;
+  final int seqLength;
+  final int hiddenSize;
+
+  _CombinedEmbeddings({
+    required this.data,
+    required this.seqLength,
+    required this.hiddenSize,
+  });
+}

@@ -6,11 +6,9 @@ import '../services/fast_vlm_service.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
-  // final FastVlmService? vlmService;
+  final FastVlmService? vlmService;
 
-  const CameraScreen({super.key, required this.cameras});
-
-  // const CameraScreen({super.key, required this.cameras, this.vlmService});
+  const CameraScreen({super.key, required this.cameras, this.vlmService});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -26,28 +24,27 @@ class _CameraScreenState extends State<CameraScreen> {
   bool isFlashOn = false;
   bool isSoundEnabled = true;
 
-  // late final FastVlmService _vlmService;
+  late final FastVlmService _vlmService;
 
-  bool _isModelLoading = true;
+  bool _isModelLoading = false;
   bool _isModelReady = false;
   bool _isProcessingFrame = false;
   bool _isWarmUpRunning = false;
   bool _canRetryWarmUp = true;
 
   String? _modelError;
-  String displayText =
-      'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¸£à¸°à¸šà¸šà¸Šà¹ˆà¸§à¸¢à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...';
+  String displayText = 'Loading model...';
   String? errorMessage;
 
   DateTime? _lastInferenceTime;
-  final Duration _inferenceInterval = const Duration(milliseconds: 900);
+  final Duration _inferenceInterval = const Duration(milliseconds: 1200);
 
   @override
   void initState() {
     super.initState();
-    // _vlmService = widget.vlmService ?? FastVlmService();
-    _warmUpModel();
+    _vlmService = widget.vlmService ?? FastVlmService();
     _initializeCamera();
+    _warmUpModel();
   }
 
   Future<void> _warmUpModel() async {
@@ -55,74 +52,62 @@ class _CameraScreenState extends State<CameraScreen> {
     _isWarmUpRunning = true;
     setState(() {
       _isModelLoading = true;
-      _isModelReady = false;
       _modelError = null;
-      displayText =
-          'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...';
-      _canRetryWarmUp = true;
     });
 
     try {
-      // await _vlmService.ensureInitialized();
-      if (!mounted) return;
+      await _vlmService.ensureInitialized();
       setState(() {
         _isModelReady = true;
-        displayText = 'à¸žà¸£à¹‰à¸­à¸¡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸žà¹à¸¥à¹‰à¸§';
-        _modelError = null;
+        displayText = 'Model ready';
       });
     } catch (e) {
-      if (!mounted) return;
       setState(() {
         _isModelReady = false;
         _modelError = e.toString();
-        displayText =
-            'à¹€à¸à¸´à¸”à¸‚à¹‰à¸­à¸œà¸´à¸”à¸žà¸¥à¸²à¸”à¹ƒà¸™à¸à¸²à¸£à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥\n$e';
+        displayText = 'Model load failed';
       });
     } finally {
       _isWarmUpRunning = false;
-      if (mounted) {
-        setState(() => _isModelLoading = false);
-      }
+      setState(() => _isModelLoading = false);
     }
   }
 
   Future<void> _initializeCamera() async {
-    PermissionStatus status;
     try {
-      status = await Permission.camera.request();
-    } catch (e) {
-      debugPrint('Permission request failed: $e');
-      status = PermissionStatus.granted;
-    }
-    if (!mounted) return;
+      final status = await Permission.camera.request();
+      if (!mounted) return;
 
-    if (status == PermissionStatus.granted) {
-      setState(() {
-        isPermissionGranted = true;
-        errorMessage = null;
-      });
-      if (widget.cameras.isNotEmpty) {
-        await _setupCamera(currentCameraIndex);
+      if (status == PermissionStatus.granted) {
+        setState(() => isPermissionGranted = true);
+        if (widget.cameras.isNotEmpty) {
+          await _setupCamera(currentCameraIndex);
+        }
+      } else {
+        setState(() => isPermissionGranted = false);
       }
-    } else {
-      setState(() => isPermissionGranted = false);
+    } catch (e) {
+      debugPrint('Camera permission error: $e');
+      setState(() => errorMessage = 'Camera permission error');
     }
   }
 
   Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
+    // Dispose old controller FIRST
     if (controller != null) {
       try {
         if (controller!.value.isStreamingImages) {
           await controller!.stopImageStream();
         }
-      } catch (e) {
-        debugPrint('Error stopping previous image stream: $e');
-      } finally {
-        await controller?.dispose();
-      }
+      } catch (_) {}
+      await controller?.dispose();
+      controller = null; // Clear reference BEFORE creating new one
     }
+
+    // Add small delay to let camera release
+    await Future.delayed(const Duration(milliseconds: 300));
 
     final newController = CameraController(
       widget.cameras[index],
@@ -133,36 +118,35 @@ class _CameraScreenState extends State<CameraScreen> {
 
     try {
       await newController.initialize();
-      if (!mounted) return;
+      if (!mounted) {
+        await newController.dispose();
+        return;
+      }
 
       await newController.setFlashMode(FlashMode.off);
-      await newController.startImageStream(_handleCameraImage);
 
+      // Start image stream AFTER setState
       setState(() {
         controller = newController;
         isInitialized = true;
         isSwitching = false;
         isFlashOn = false;
         errorMessage = null;
-        _lastInferenceTime = null;
-        _isProcessingFrame = false;
+        displayText = 'Camera ready';
       });
+
+      // Start streaming AFTER state is updated
+      await controller!.startImageStream(_handleCameraImage);
     } catch (e) {
-      debugPrint('Error initializing camera: $e');
       await newController.dispose();
-      setState(() {
-        isSwitching = false;
-        errorMessage =
-            "à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¹€à¸›à¸´à¸”à¸à¸¥à¹‰à¸­à¸‡à¹„à¸”à¹‰";
-        _isProcessingFrame = false;
-        _lastInferenceTime = null;
-      });
+      if (mounted) {
+        setState(() => errorMessage = 'Camera init error: $e');
+      }
     }
   }
 
   Future<void> switchCamera() async {
     if (widget.cameras.length < 2 || isSwitching) return;
-
     setState(() {
       isSwitching = true;
       isInitialized = false;
@@ -172,16 +156,8 @@ class _CameraScreenState extends State<CameraScreen> {
     await _setupCamera(currentCameraIndex);
   }
 
-  // âœ… Fixed: async IIFE, no catchError misuse
-  void _handleCameraImage(CameraImage image) {
-    if (_isModelLoading) return;
-
-    if (!_isModelReady) {
-      if (_modelError != null && _canRetryWarmUp && !_isWarmUpRunning) {
-        _warmUpModel();
-      }
-      return;
-    }
+  Future<void> _handleCameraImage(CameraImage image) async {
+    if (!_isModelReady || _isModelLoading) return;
 
     final now = DateTime.now();
     if (_isProcessingFrame) return;
@@ -191,33 +167,27 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     _isProcessingFrame = true;
-    if (mounted && !_isModelLoading) {
-      setState(
-        () => displayText = 'à¸à¸³à¸¥à¸±à¸‡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...',
-      );
-    }
+    _lastInferenceTime = now;
+    setState(() => displayText = 'Analyzing scene...');
 
-    () async {
-      try {
-        // final result = await _vlmService.describeCameraImage(image);
-        if (!mounted) return;
-        setState(() {
-          // displayText = result;
-          _modelError = null;
-        });
-      } catch (error, stack) {
-        debugPrint('FastVLM error: $error\n$stack');
-        if (!mounted) return;
-        setState(() {
-          _modelError = error.toString();
-          displayText =
-              'à¹„à¸¡à¹ˆà¸ªà¸²à¸¡à¸²à¸£à¸–à¸›à¸£à¸°à¸¡à¸§à¸¥à¸œà¸¥à¸ à¸²à¸žà¹„à¸”à¹‰\n$error';
-        });
-      } finally {
-        _lastInferenceTime = DateTime.now();
-        _isProcessingFrame = false;
-      }
-    }();
+    try {
+      final result = await _vlmService.describeCameraImage(image);
+      if (!mounted) return;
+
+      setState(() {
+        displayText = result;
+        _modelError = null;
+      });
+    } catch (e) {
+      debugPrint('Inference error: $e');
+      if (!mounted) return;
+      setState(() {
+        _modelError = e.toString();
+        displayText = 'Cannot analyze scene';
+      });
+    } finally {
+      _isProcessingFrame = false;
+    }
   }
 
   Future<void> toggleFlash() async {
@@ -227,7 +197,7 @@ class _CameraScreenState extends State<CameraScreen> {
       await controller!.setFlashMode(newMode);
       setState(() => isFlashOn = !isFlashOn);
     } catch (e) {
-      debugPrint('Error toggling flash: $e');
+      debugPrint('Flash toggle error: $e');
     }
   }
 
@@ -241,7 +211,7 @@ class _CameraScreenState extends State<CameraScreen> {
       final image = await controller!.takePicture();
       debugPrint('Picture taken: ${image.path}');
     } catch (e) {
-      debugPrint('Error taking picture: $e');
+      debugPrint('Picture error: $e');
     }
   }
 
@@ -250,26 +220,27 @@ class _CameraScreenState extends State<CameraScreen> {
     debugPrint('Sound ${isSoundEnabled ? 'enabled' : 'disabled'}');
   }
 
-  void openSettings() {
-    debugPrint('Opening settings...');
-  }
-
   @override
   void dispose() {
-    final currentController = controller;
-    controller = null;
-    if (currentController != null) {
-      try {
-        if (currentController.value.isStreamingImages) {
-          currentController.stopImageStream();
-        }
-      } catch (e) {
-        debugPrint('Error stopping image stream on dispose: $e');
-      }
-      currentController.dispose();
-    }
-    // _vlmService.dispose();
+    _disposeCamera();
+    _vlmService.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeCamera() async {
+    if (controller != null) {
+      try {
+        if (controller!.value.isStreamingImages) {
+          await controller!.stopImageStream();
+        }
+      } catch (_) {}
+
+      try {
+        await controller?.dispose();
+      } catch (_) {}
+
+      controller = null;
+    }
   }
 
   @override
@@ -318,7 +289,7 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _circleButton(Icons.settings, openSettings),
+          _circleButton(Icons.settings, () {}),
           _circleButton(
             isFlashOn ? Icons.flash_on : Icons.flash_off,
             toggleFlash,
@@ -347,12 +318,9 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.7),
+          color: Colors.black.withOpacity(0.7),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.3),
-            width: 1,
-          ),
+          border: Border.all(color: Colors.white24, width: 1),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -362,8 +330,8 @@ class _CameraScreenState extends State<CameraScreen> {
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const SizedBox(
+                  children: const [
+                    SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
@@ -371,17 +339,10 @@ class _CameraScreenState extends State<CameraScreen> {
                         color: Colors.white,
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Flexible(
-                      child: Text(
-                        _isModelLoading
-                            ? 'à¸à¸³à¸¥à¸±à¸‡à¹€à¸•à¸£à¸µà¸¢à¸¡à¹‚à¸¡à¹€à¸”à¸¥...'
-                            : 'à¸à¸³à¸¥à¸±à¸‡à¸šà¸£à¸£à¸¢à¸²à¸¢à¸ à¸²à¸ž...',
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 14,
-                        ),
-                      ),
+                    SizedBox(width: 12),
+                    Text(
+                      'Processing...',
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
                     ),
                   ],
                 ),
@@ -411,16 +372,6 @@ class _CameraScreenState extends State<CameraScreen> {
           shape: BoxShape.circle,
           color: Colors.white,
           border: Border.all(color: Colors.grey.shade400, width: 3),
-        ),
-        child: Center(
-          child: Container(
-            width: 60,
-            height: 60,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white,
-            ),
-          ),
         ),
       ),
     );
@@ -506,7 +457,6 @@ class _CameraScreenState extends State<CameraScreen> {
             onPressed: () => openAppSettings(),
             child: const Text('Open Settings'),
           ),
-          const SizedBox(height: 12),
           TextButton(
             onPressed: _initializeCamera,
             child: const Text(
@@ -533,7 +483,7 @@ class _CameraScreenState extends State<CameraScreen> {
         width: size,
         height: size,
         decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-        child: iconSize > 0 ? Icon(icon, color: color, size: iconSize) : null,
+        child: Icon(icon, color: color, size: iconSize),
       ),
     );
   }
@@ -550,6 +500,7 @@ class _SightPainter extends CustomPainter {
     const len = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
+    // corners
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
     canvas.drawLine(rect.topRight, rect.topRight - const Offset(len, 0), paint);

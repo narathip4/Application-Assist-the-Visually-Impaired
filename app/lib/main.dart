@@ -9,7 +9,7 @@ List<CameraDescription> cameras = [];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Ensure model files exist and are correct
+  // Models are cached - no need to clear anymore
   await ModelLoader.ensureModelsDownloaded();
   await testModelIntegrity();
 

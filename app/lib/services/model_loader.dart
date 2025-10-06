@@ -9,24 +9,23 @@ class ModelLoader {
 
   /// FP16 model + config files
   static const Map<String, String> _fp16 = {
-    // ONNX models
+    // ONNX models - FIXED URLs
     'vision_encoder_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/vision_encoder_fp16.onnx?download=true',
+        '$_base/$_repo/resolve/main/onnx/vision_encoder_fp16.onnx',
     'embed_tokens_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/embed_tokens_fp16.onnx?download=true',
+        '$_base/$_repo/resolve/main/onnx/embed_tokens_fp16.onnx',
     'decoder_model_merged_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/decoder_model_merged_fp16.onnx?download=true',
+        '$_base/$_repo/resolve/main/onnx/decoder_model_merged_fp16.onnx',
 
-    // Tokenizer + configs
-    'tokenizer.json': '$_base/$_repo/resolve/main/tokenizer.json?download=true',
+    // Tokenizer + configs - FIXED URLs
+    'tokenizer.json': '$_base/$_repo/resolve/main/tokenizer.json',
     'preprocessor_config.json':
-        '$_base/$_repo/resolve/main/preprocessor_config.json?download=true',
+        '$_base/$_repo/resolve/main/preprocessor_config.json',
     'special_tokens_map.json':
-        '$_base/$_repo/resolve/main/special_tokens_map.json?download=true',
+        '$_base/$_repo/resolve/main/special_tokens_map.json',
     'generation_config.json':
-        '$_base/$_repo/resolve/main/generation_config.json?download=true',
-    'tokenizer_config.json':
-        '$_base/$_repo/resolve/main/tokenizer_config.json?download=true',
+        '$_base/$_repo/resolve/main/generation_config.json',
+    'tokenizer_config.json': '$_base/$_repo/resolve/main/tokenizer_config.json',
   };
 
   /// Minimum expected file sizes (MB)
@@ -67,7 +66,7 @@ class ModelLoader {
   /// Debug helper: print all cached files.
   static Future<void> printInventory() async {
     final dir = await _targetDir();
-    _log('📂 Model directory: ${dir.path}');
+    _log('Model directory: ${dir.path}');
     if (!await dir.exists()) return;
 
     final entries = await dir.list().where((e) => e is File).toList();
@@ -89,7 +88,7 @@ class ModelLoader {
     final file = File(p.join(dir.path, name));
 
     if (await _isValid(name, file)) {
-      _log('√ Cached $name (${_mb(await file.length())} MB)');
+      _log('Cached $name (${_mb(await file.length())} MB)');
       return;
     }
 
@@ -103,30 +102,77 @@ class ModelLoader {
       } catch (_) {}
       throw HttpException('Downloaded $name but validation failed.');
     }
-    _log('√ Cached $name (${_mb(await file.length())} MB)');
+    _log('Cached $name (${_mb(await file.length())} MB)');
   }
 
   static Future<bool> _isValid(String name, File f) async {
     try {
-      if (!await f.exists()) return false;
-      final bytes = await f.length();
-      final minMB = _minSizeMB[name];
-      if (minMB != null && bytes < minMB * 1024 * 1024) return false;
+      if (!await f.exists()) {
+        _log('$name: File does not exist');
+        return false;
+      }
 
-      // sanity: detect HTML pages instead of binary
+      final bytes = await f.length();
+      _log('Validating $name: ${_mb(bytes)} MB');
+
+      // Check minimum size
+      final minMB = _minSizeMB[name];
+      if (minMB != null && bytes < minMB * 1024 * 1024) {
+        _log('$name: Too small (${_mb(bytes)} MB < ${minMB} MB)');
+        return false;
+      }
+
+      // Must have some content
+      if (bytes == 0) {
+        _log('$name: File is empty');
+        return false;
+      }
+
+      // Read first bytes to detect HTML/error pages
       final raf = await f.open();
       final n = await raf.length();
-      final head = await raf.read(n >= 512 ? 512 : n);
+      final head = await raf.read(n >= 1024 ? 1024 : n);
       await raf.close();
+
       final s = String.fromCharCodes(head);
+
+      // Log first 200 chars for debugging
+      _log(
+        'First bytes of $name: ${s.substring(0, s.length > 200 ? 200 : s.length)}',
+      );
+
+      // Reject HTML/error content
       if (s.contains('<!DOCTYPE') ||
           s.contains('<html') ||
-          s.contains('error') ||
-          s.contains('Cloudflare'))
+          s.contains('<HTML') ||
+          s.contains('Cloudflare') ||
+          s.contains('404') ||
+          s.contains('403')) {
+        _log('$name: Contains HTML/error content');
         return false;
+      }
+
+      // For ONNX files, just check it's binary (not text)
+      if (name.endsWith('.onnx')) {
+        // Check if it starts with printable ASCII (likely text/HTML)
+        final firstChars = head.take(100).toList();
+        int printableCount = 0;
+        for (var byte in firstChars) {
+          if (byte >= 32 && byte <= 126) printableCount++;
+        }
+
+        // If more than 80% printable ASCII, it's probably HTML/text
+        if (printableCount > 80) {
+          _log('$name: Appears to be text, not binary ONNX');
+          return false;
+        }
+
+        _log('$name: Looks like binary ONNX file');
+      }
 
       return bytes > 0;
-    } catch (_) {
+    } catch (e) {
+      _log('Validation error for $name: $e');
       return false;
     }
   }
@@ -147,20 +193,25 @@ class ModelLoader {
         if (await dest.exists()) await dest.delete();
       } catch (_) {}
 
-      _log('⬇ Downloading $name (attempt $i/$maxRetries)...');
+      _log('Downloading $name (attempt $i/$maxRetries)...');
+      _log('URL: $url');
 
       final client = http.Client();
       try {
         final req = http.Request('GET', Uri.parse(url))
           ..followRedirects = true
           ..headers.addAll({
-            'accept': 'application/octet-stream',
-            'user-agent': 'flutter-app/onnx-downloader',
+            'User-Agent': 'Mozilla/5.0 (compatible; FlutterApp/1.0)',
+            'Accept': '*/*',
           });
 
         final resp = await client
             .send(req)
             .timeout(const Duration(minutes: 20));
+
+        _log('HTTP Status: ${resp.statusCode}');
+        _log('Content-Type: ${resp.headers['content-type']}');
+        _log('Content-Length: ${resp.headers['content-length']}');
 
         if (resp.statusCode != 200) {
           await resp.stream.drain();
@@ -168,8 +219,17 @@ class ModelLoader {
         }
 
         final sink = tmp.openWrite();
-        await resp.stream.listen(sink.add).asFuture();
+        int downloaded = 0;
+        await for (var chunk in resp.stream) {
+          sink.add(chunk);
+          downloaded += chunk.length;
+          if (downloaded % (10 * 1024 * 1024) == 0) {
+            _log('   Downloaded: ${_mb(downloaded)} MB...');
+          }
+        }
         await sink.close();
+
+        _log('Download complete: ${_mb(await tmp.length())} MB');
 
         final ct = (resp.headers['content-type'] ?? '').toLowerCase();
         if (ct.contains('text/html')) {
@@ -178,10 +238,14 @@ class ModelLoader {
 
         await tmp.rename(dest.path);
 
-        if (await _isValid(name, dest)) return; // success
+        if (await _isValid(name, dest)) {
+          _log('Validation passed for $name');
+          return; // success
+        }
+
         throw const HttpException('Post-download validation failed');
       } catch (e) {
-        _log('⚠️ Download error for $name: $e');
+        _log('Download error for $name: $e');
         try {
           if (await tmp.exists()) await tmp.delete();
         } catch (_) {}
@@ -195,4 +259,13 @@ class ModelLoader {
 
   static String _mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(2);
   static void _log(Object o) => print(o);
+
+  /// Delete all cached models to force fresh download
+  // static Future<void> clearCache() async {
+  //   final dir = await _targetDir();
+  //   if (await dir.exists()) {
+  //     await dir.delete(recursive: true);
+  //     _log('Cache cleared');
+  //   }
+  // }
 }
