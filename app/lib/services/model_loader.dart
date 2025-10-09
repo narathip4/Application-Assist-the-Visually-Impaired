@@ -3,21 +3,29 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+/// Handles model file management for the FastVLM ONNX package.
+///
+/// This class is responsible for:
+/// 1. Ensuring that all model and configuration files are downloaded.
+/// 2. Verifying file validity and minimum size.
+/// 3. Printing a local inventory for debugging purposes.
+///
+/// The downloaded models are stored under:
+///   {application_documents_directory}/models/FastVLM-0.5B-ONNX
 class ModelLoader {
   static const String _repo = 'onnx-community/FastVLM-0.5B-ONNX';
   static const String _base = 'https://huggingface.co';
 
-  /// FP16 model + config files
-  static const Map<String, String> _fp16 = {
-    // ONNX models - FIXED URLs
-    'vision_encoder_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/vision_encoder_fp16.onnx',
-    'embed_tokens_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/embed_tokens_fp16.onnx',
-    'decoder_model_merged_fp16.onnx':
-        '$_base/$_repo/resolve/main/onnx/decoder_model_merged_fp16.onnx',
+  /// Mapping of model and configuration filenames to their Hugging Face URLs.
+  static const Map<String, String> _fp32 = {
+    // Core ONNX models
+    'vision_encoder.onnx':
+        '$_base/$_repo/resolve/main/onnx/vision_encoder.onnx',
+    'embed_tokens.onnx': '$_base/$_repo/resolve/main/onnx/embed_tokens.onnx',
+    'decoder_model_merged.onnx':
+        'https://huggingface.co/onnx-community/FastVLM-0.5B-ONNX/resolve/main/onnx/decoder_model_merged.onnx?download=true',
 
-    // Tokenizer + configs - FIXED URLs
+    // Tokenizer and configuration files
     'tokenizer.json': '$_base/$_repo/resolve/main/tokenizer.json',
     'preprocessor_config.json':
         '$_base/$_repo/resolve/main/preprocessor_config.json',
@@ -28,42 +36,47 @@ class ModelLoader {
     'tokenizer_config.json': '$_base/$_repo/resolve/main/tokenizer_config.json',
   };
 
-  /// Minimum expected file sizes (MB)
+  /// Minimum size thresholds (in megabytes) for model files.
+  /// Used to detect incomplete or invalid downloads.
   static const Map<String, int> _minSizeMB = {
-    'vision_encoder_fp16.onnx': 220, // real ≈241 MB
-    'embed_tokens_fp16.onnx': 0, // small but needed
-    'decoder_model_merged_fp16.onnx': 50, // ≈54 MB
-    'tokenizer.json': 8,
+    'vision_encoder.onnx': 220,
+    'embed_tokens.onnx': 1,
+    'decoder_model_merged.onnx': 1,
+    'tokenizer.json': 1,
   };
 
+  /// Local model directory relative to app documents path.
   static const String _folder = 'models/FastVLM-0.5B-ONNX';
 
-  /// Ensures all models and configs are present and valid.
+  /// Ensures all model and configuration files are downloaded and valid.
   static Future<void> ensureModelsDownloaded() async {
     final dir = await _targetDir();
-    if (!await dir.exists()) await dir.create(recursive: true);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
 
-    for (final e in _fp16.entries) {
-      await _ensureOne(e.key, e.value);
+    for (final entry in _fp32.entries) {
+      await _ensureOne(entry.key, entry.value);
     }
   }
 
-  /// Returns all file paths.
+  /// Returns a map of model filenames to their absolute local paths.
+  /// Throws [FileSystemException] if any required file is missing or invalid.
   static Future<Map<String, String>> getAllModelPaths() async {
     final dir = await _targetDir();
-    final out = <String, String>{};
+    final result = <String, String>{};
 
-    for (final name in _fp16.keys) {
-      final f = File(p.join(dir.path, name));
-      if (!await _isValid(name, f)) {
-        throw FileSystemException('Model file not found or invalid', f.path);
+    for (final name in _fp32.keys) {
+      final file = File(p.join(dir.path, name));
+      if (!await _isValid(name, file)) {
+        throw FileSystemException('Model file not found or invalid', file.path);
       }
-      out[name] = f.path;
+      result[name] = file.path;
     }
-    return out;
+    return result;
   }
 
-  /// Debug helper: print all cached files.
+  /// Prints all cached model files with their sizes for debugging.
   static Future<void> printInventory() async {
     final dir = await _targetDir();
     _log('Model directory: ${dir.path}');
@@ -78,11 +91,14 @@ class ModelLoader {
     }
   }
 
+  /// Resolves the target directory where model files are stored.
   static Future<Directory> _targetDir() async {
     final base = await getApplicationDocumentsDirectory();
     return Directory(p.join(base.path, _folder));
   }
 
+  /// Ensures that a single model file exists and passes validation.
+  /// If the file is missing or invalid, it will be downloaded again.
   static Future<void> _ensureOne(String name, String url) async {
     final dir = await _targetDir();
     final file = File(p.join(dir.path, name));
@@ -95,88 +111,56 @@ class ModelLoader {
     await file.parent.create(recursive: true);
     await _downloadWithChecks(url, file, name);
 
-    // Final validation
     if (!await _isValid(name, file)) {
       try {
         await file.delete();
       } catch (_) {}
       throw HttpException('Downloaded $name but validation failed.');
     }
+
     _log('Cached $name (${_mb(await file.length())} MB)');
   }
 
-  static Future<bool> _isValid(String name, File f) async {
+  /// Validates that a file exists, meets size requirements, and is not an HTML error page.
+  static Future<bool> _isValid(String name, File file) async {
     try {
-      if (!await f.exists()) {
-        _log('$name: File does not exist');
-        return false;
-      }
+      if (!await file.exists()) return false;
 
-      final bytes = await f.length();
-      _log('Validating $name: ${_mb(bytes)} MB');
-
-      // Check minimum size
+      final bytes = await file.length();
       final minMB = _minSizeMB[name];
-      if (minMB != null && bytes < minMB * 1024 * 1024) {
-        _log('$name: Too small (${_mb(bytes)} MB < ${minMB} MB)');
-        return false;
-      }
+      if (minMB != null && bytes < minMB * 1024 * 1024) return false;
+      if (bytes == 0) return false;
 
-      // Must have some content
-      if (bytes == 0) {
-        _log('$name: File is empty');
-        return false;
-      }
-
-      // Read first bytes to detect HTML/error pages
-      final raf = await f.open();
+      final raf = await file.open();
       final n = await raf.length();
       final head = await raf.read(n >= 1024 ? 1024 : n);
       await raf.close();
 
-      final s = String.fromCharCodes(head);
-
-      // Log first 200 chars for debugging
-      _log(
-        'First bytes of $name: ${s.substring(0, s.length > 200 ? 200 : s.length)}',
-      );
-
-      // Reject HTML/error content
-      if (s.contains('<!DOCTYPE') ||
-          s.contains('<html') ||
-          s.contains('<HTML') ||
-          s.contains('Cloudflare') ||
-          s.contains('404') ||
-          s.contains('403')) {
-        _log('$name: Contains HTML/error content');
+      final sample = String.fromCharCodes(head);
+      if (sample.contains('<!DOCTYPE') ||
+          sample.contains('<html') ||
+          sample.contains('Cloudflare') ||
+          sample.contains('404') ||
+          sample.contains('403')) {
         return false;
       }
 
-      // For ONNX files, just check it's binary (not text)
+      // Simple sanity check for ONNX files
       if (name.endsWith('.onnx')) {
-        // Check if it starts with printable ASCII (likely text/HTML)
-        final firstChars = head.take(100).toList();
-        int printableCount = 0;
-        for (var byte in firstChars) {
-          if (byte >= 32 && byte <= 126) printableCount++;
-        }
-
-        // If more than 80% printable ASCII, it's probably HTML/text
-        if (printableCount > 80) {
-          _log('$name: Appears to be text, not binary ONNX');
+        if (bytes < 1000 * 1024) {
+          _log('$name: file size too small (${_mb(bytes)} MB)');
           return false;
         }
-
-        _log('$name: Looks like binary ONNX file');
+        _log('$name: ONNX file validation passed');
       }
 
       return bytes > 0;
-    } catch (e) {
-      _log('Validation error for $name: $e');
+    } catch (_) {
       return false;
     }
   }
 
+  /// Downloads a file from a URL with basic retry and validation logic.
   static Future<void> _downloadWithChecks(
     String url,
     File dest,
@@ -184,34 +168,23 @@ class ModelLoader {
   ) async {
     const maxRetries = 4;
 
-    for (int i = 1; i <= maxRetries; i++) {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
       final tmp = File('${dest.path}.part');
       try {
         if (await tmp.exists()) await tmp.delete();
       } catch (_) {}
-      try {
-        if (await dest.exists()) await dest.delete();
-      } catch (_) {}
 
-      _log('Downloading $name (attempt $i/$maxRetries)...');
-      _log('URL: $url');
-
+      _log('Downloading $name (attempt $attempt/$maxRetries)');
       final client = http.Client();
+
       try {
         final req = http.Request('GET', Uri.parse(url))
           ..followRedirects = true
-          ..headers.addAll({
-            'User-Agent': 'Mozilla/5.0 (compatible; FlutterApp/1.0)',
-            'Accept': '*/*',
-          });
+          ..headers.addAll({'User-Agent': 'FlutterApp/1.0', 'Accept': '*/*'});
 
         final resp = await client
             .send(req)
             .timeout(const Duration(minutes: 20));
-
-        _log('HTTP Status: ${resp.statusCode}');
-        _log('Content-Type: ${resp.headers['content-type']}');
-        _log('Content-Length: ${resp.headers['content-length']}');
 
         if (resp.statusCode != 200) {
           await resp.stream.drain();
@@ -219,53 +192,28 @@ class ModelLoader {
         }
 
         final sink = tmp.openWrite();
-        int downloaded = 0;
-        await for (var chunk in resp.stream) {
+        await for (final chunk in resp.stream) {
           sink.add(chunk);
-          downloaded += chunk.length;
-          if (downloaded % (10 * 1024 * 1024) == 0) {
-            _log('   Downloaded: ${_mb(downloaded)} MB...');
-          }
         }
         await sink.close();
 
-        _log('Download complete: ${_mb(await tmp.length())} MB');
-
-        final ct = (resp.headers['content-type'] ?? '').toLowerCase();
-        if (ct.contains('text/html')) {
-          throw const HttpException('Got HTML instead of binary');
-        }
-
         await tmp.rename(dest.path);
 
-        if (await _isValid(name, dest)) {
-          _log('Validation passed for $name');
-          return; // success
-        }
-
+        if (await _isValid(name, dest)) return;
         throw const HttpException('Post-download validation failed');
       } catch (e) {
         _log('Download error for $name: $e');
-        try {
-          if (await tmp.exists()) await tmp.delete();
-        } catch (_) {}
-        await Future.delayed(Duration(milliseconds: 400 * i));
-        if (i == maxRetries) rethrow;
+        if (attempt == maxRetries) rethrow;
+        await Future.delayed(Duration(milliseconds: 400 * attempt));
       } finally {
         client.close();
       }
     }
   }
 
+  /// Converts byte count to megabytes for readable output.
   static String _mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(2);
-  static void _log(Object o) => print(o);
 
-  /// Delete all cached models to force fresh download
-  // static Future<void> clearCache() async {
-  //   final dir = await _targetDir();
-  //   if (await dir.exists()) {
-  //     await dir.delete(recursive: true);
-  //     _log('Cache cleared');
-  //   }
-  // }
+  /// Basic logger. Replace with debugPrint if desired.
+  static void _log(Object message) => print(message);
 }

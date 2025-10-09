@@ -32,13 +32,18 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isWarmUpRunning = false;
   bool _canRetryWarmUp = true;
 
+  // press and hold
+  bool _isLongPressing = false;
+  bool _shouldProcessImage = false;
+
   String? _modelError;
-  String displayText = 'Loading model...';
+  String displayText = 'Press and hold shutter button to analyze';
   String? errorMessage;
 
   DateTime? _lastInferenceTime;
-  final Duration _inferenceInterval = const Duration(milliseconds: 1200);
-
+  final Duration _inferenceInterval = const Duration(
+    milliseconds: 1500,
+  ); // 1.5 seconds between inferences
   @override
   void initState() {
     super.initState();
@@ -59,7 +64,7 @@ class _CameraScreenState extends State<CameraScreen> {
       await _vlmService.ensureInitialized();
       setState(() {
         _isModelReady = true;
-        displayText = 'Model ready';
+        displayText = 'Press and hold shutter button to analyze';
       });
     } catch (e) {
       setState(() {
@@ -95,7 +100,6 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
-    // Dispose old controller FIRST
     if (controller != null) {
       try {
         if (controller!.value.isStreamingImages) {
@@ -103,10 +107,9 @@ class _CameraScreenState extends State<CameraScreen> {
         }
       } catch (_) {}
       await controller?.dispose();
-      controller = null; // Clear reference BEFORE creating new one
+      controller = null;
     }
 
-    // Add small delay to let camera release
     await Future.delayed(const Duration(milliseconds: 300));
 
     final newController = CameraController(
@@ -125,17 +128,15 @@ class _CameraScreenState extends State<CameraScreen> {
 
       await newController.setFlashMode(FlashMode.off);
 
-      // Start image stream AFTER setState
       setState(() {
         controller = newController;
         isInitialized = true;
         isSwitching = false;
         isFlashOn = false;
         errorMessage = null;
-        displayText = 'Camera ready';
+        displayText = 'Press and hold shutter button to analyze';
       });
 
-      // Start streaming AFTER state is updated
       await controller!.startImageStream(_handleCameraImage);
     } catch (e) {
       await newController.dispose();
@@ -150,6 +151,7 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {
       isSwitching = true;
       isInitialized = false;
+      _shouldProcessImage = false; // stop processing when switching
     });
 
     currentCameraIndex = (currentCameraIndex + 1) % widget.cameras.length;
@@ -157,10 +159,11 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _handleCameraImage(CameraImage image) async {
+    // Prevent re-entrancy: skip if already processing
+    if (_isProcessingFrame || !_shouldProcessImage) return;
     if (!_isModelReady || _isModelLoading) return;
 
     final now = DateTime.now();
-    if (_isProcessingFrame) return;
     if (_lastInferenceTime != null &&
         now.difference(_lastInferenceTime!) < _inferenceInterval) {
       return;
@@ -168,7 +171,10 @@ class _CameraScreenState extends State<CameraScreen> {
 
     _isProcessingFrame = true;
     _lastInferenceTime = now;
-    setState(() => displayText = 'Analyzing scene...');
+
+    if (mounted) {
+      setState(() => displayText = 'Analyzing scene...');
+    }
 
     try {
       final result = await _vlmService.describeCameraImage(image);
@@ -187,6 +193,9 @@ class _CameraScreenState extends State<CameraScreen> {
       });
     } finally {
       _isProcessingFrame = false;
+
+      // Add a small delay to let memory and GC settle
+      await Future.delayed(const Duration(milliseconds: 150));
     }
   }
 
@@ -201,19 +210,51 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> takePicture() async {
-    if (controller == null ||
-        !controller!.value.isInitialized ||
-        controller!.value.isTakingPicture) {
-      return;
-    }
-    try {
-      final image = await controller!.takePicture();
-      debugPrint('Picture taken: ${image.path}');
-    } catch (e) {
-      debugPrint('Picture error: $e');
-    }
+  // start long press
+  void _onLongPressStart() {
+    setState(() {
+      _isLongPressing = true;
+      _shouldProcessImage = true;
+      displayText = 'Analyzing...';
+    });
   }
+
+  // stop long press
+  void _onLongPressEnd() {
+    setState(() {
+      _isLongPressing = false;
+      _shouldProcessImage = false;
+      if (!_isProcessingFrame) {
+        displayText = 'Press and hold shutter button to analyze';
+      }
+    });
+  }
+
+  // // capture photo
+  // Future<void> takePicture() async {
+  //   if (controller == null ||
+  //       !controller!.value.isInitialized ||
+  //       controller!.value.isTakingPicture) {
+  //     return;
+  //   }
+  //   try {
+  //     final image = await controller!.takePicture();
+  //     debugPrint('Picture taken: ${image.path}');
+  //     // แสดงข้อความแจ้งเตือน
+  //     if (mounted) {
+  //       setState(() => displayText = 'Picture saved!');
+  //       Future.delayed(const Duration(seconds: 2), () {
+  //         if (mounted && !_shouldProcessImage) {
+  //           setState(
+  //             () => displayText = 'Press and hold shutter button to analyze',
+  //           );
+  //         }
+  //       });
+  //     }
+  //   } catch (e) {
+  //     debugPrint('Picture error: $e');
+  //   }
+  // }
 
   void toggleSound() {
     setState(() => isSoundEnabled = !isSoundEnabled);
@@ -222,6 +263,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    _shouldProcessImage = false; // stop processing when disposing
     _disposeCamera();
     _vlmService.dispose();
     super.dispose();
@@ -325,7 +367,7 @@ class _CameraScreenState extends State<CameraScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (_isModelLoading || _isProcessingFrame)
+            if (_isModelLoading || (_isProcessingFrame && _shouldProcessImage))
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Row(
@@ -362,17 +404,37 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
+  // long press shutter button
   Widget _shutterButton(VoidCallback onTap) {
     return GestureDetector(
-      onTap: onTap,
+      // onTap: onTap, // tap to take picture
+      onLongPressStart: (_) => _onLongPressStart(), // hold to start analyze
+      onLongPressEnd: (_) => _onLongPressEnd(), // release to stop analyze
       child: Container(
         width: 70,
         height: 70,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Colors.white,
-          border: Border.all(color: Colors.grey.shade400, width: 3),
+          color: _isLongPressing
+              ? Colors.green
+              : Colors.white, // green when analyzing
+          border: Border.all(
+            color: _isLongPressing ? Colors.greenAccent : Colors.grey.shade400,
+            width: 3,
+          ),
+          boxShadow: _isLongPressing
+              ? [
+                  BoxShadow(
+                    color: Colors.green.withOpacity(0.5),
+                    blurRadius: 10,
+                    spreadRadius: 2,
+                  ),
+                ]
+              : null,
         ),
+        child: _isLongPressing
+            ? const Icon(Icons.visibility, color: Colors.white, size: 32)
+            : null,
       ),
     );
   }
@@ -387,10 +449,16 @@ class _CameraScreenState extends State<CameraScreen> {
         color: Colors.black,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceAround,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
+            // Flip camera button (if multiple cameras)
             if (widget.cameras.length > 1)
               _circleButton(Icons.flip_camera_ios, switchCamera),
-            _shutterButton(takePicture),
+
+            // Center shutter button for analyze (long press)
+            _shutterButton(() {}),
+
+            // Sound toggle
             _circleButton(
               isSoundEnabled ? Icons.volume_up : Icons.volume_off,
               toggleSound,
@@ -500,7 +568,6 @@ class _SightPainter extends CustomPainter {
     const len = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // corners
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
     canvas.drawLine(rect.topRight, rect.topRight - const Offset(len, 0), paint);
