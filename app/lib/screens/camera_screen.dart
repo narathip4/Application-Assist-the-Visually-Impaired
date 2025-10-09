@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/fast_vlm_service.dart';
+
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
+  final FastVlmService? vlmService;
 
-  const CameraScreen({Key? key, required this.cameras}) : super(key: key);
+  const CameraScreen({super.key, required this.cameras, this.vlmService});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -14,42 +17,100 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? controller;
   int currentCameraIndex = 0;
+
   bool isInitialized = false;
   bool isPermissionGranted = false;
   bool isSwitching = false;
   bool isFlashOn = false;
   bool isSoundEnabled = true;
-  String? errorMessage;
-  String displayText =
-      "Text that text-to-speech will read appears here"; // Text to display
 
+  late final FastVlmService _vlmService;
+
+  bool _isModelLoading = false;
+  bool _isModelReady = false;
+  bool _isProcessingFrame = false;
+  bool _isWarmUpRunning = false;
+  bool _canRetryWarmUp = true;
+
+  // press and hold
+  bool _isLongPressing = false;
+  bool _shouldProcessImage = false;
+
+  String? _modelError;
+  String displayText = 'Press and hold shutter button to analyze';
+  String? errorMessage;
+
+  DateTime? _lastInferenceTime;
+  final Duration _inferenceInterval = const Duration(
+    milliseconds: 1500,
+  ); // 1.5 seconds between inferences
   @override
   void initState() {
     super.initState();
+    _vlmService = widget.vlmService ?? FastVlmService();
     _initializeCamera();
+    _warmUpModel();
+  }
+
+  Future<void> _warmUpModel() async {
+    if (_isWarmUpRunning) return;
+    _isWarmUpRunning = true;
+    setState(() {
+      _isModelLoading = true;
+      _modelError = null;
+    });
+
+    try {
+      await _vlmService.ensureInitialized();
+      setState(() {
+        _isModelReady = true;
+        displayText = 'Press and hold shutter button to analyze';
+      });
+    } catch (e) {
+      setState(() {
+        _isModelReady = false;
+        _modelError = e.toString();
+        displayText = 'Model load failed';
+      });
+    } finally {
+      _isWarmUpRunning = false;
+      setState(() => _isModelLoading = false);
+    }
   }
 
   Future<void> _initializeCamera() async {
-    final status = await Permission.camera.request();
-    if (!mounted) return;
+    try {
+      final status = await Permission.camera.request();
+      if (!mounted) return;
 
-    if (status == PermissionStatus.granted) {
-      setState(() {
-        isPermissionGranted = true;
-        errorMessage = null;
-      });
-      if (widget.cameras.isNotEmpty) {
-        await _setupCamera(currentCameraIndex);
+      if (status == PermissionStatus.granted) {
+        setState(() => isPermissionGranted = true);
+        if (widget.cameras.isNotEmpty) {
+          await _setupCamera(currentCameraIndex);
+        }
+      } else {
+        setState(() => isPermissionGranted = false);
       }
-    } else {
-      setState(() => isPermissionGranted = false);
+    } catch (e) {
+      debugPrint('Camera permission error: $e');
+      setState(() => errorMessage = 'Camera permission error');
     }
   }
 
   Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
-    await controller?.dispose();
+    if (controller != null) {
+      try {
+        if (controller!.value.isStreamingImages) {
+          await controller!.stopImageStream();
+        }
+      } catch (_) {}
+      await controller?.dispose();
+      controller = null;
+    }
+
+    await Future.delayed(const Duration(milliseconds: 300));
 
     final newController = CameraController(
       widget.cameras[index],
@@ -60,9 +121,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
     try {
       await newController.initialize();
-      if (!mounted) return;
+      if (!mounted) {
+        await newController.dispose();
+        return;
+      }
 
-      // Reset flash เป็น off ทุกครั้ง
       await newController.setFlashMode(FlashMode.off);
 
       setState(() {
@@ -71,68 +134,155 @@ class _CameraScreenState extends State<CameraScreen> {
         isSwitching = false;
         isFlashOn = false;
         errorMessage = null;
+        displayText = 'Press and hold shutter button to analyze';
       });
+
+      await controller!.startImageStream(_handleCameraImage);
     } catch (e) {
-      debugPrint('Error initializing camera: $e');
-      setState(() {
-        isSwitching = false;
-        errorMessage = "ไม่สามารถเปิดกล้องได้";
-      });
+      await newController.dispose();
+      if (mounted) {
+        setState(() => errorMessage = 'Camera init error: $e');
+      }
     }
   }
 
   Future<void> switchCamera() async {
     if (widget.cameras.length < 2 || isSwitching) return;
-
     setState(() {
       isSwitching = true;
       isInitialized = false;
+      _shouldProcessImage = false; // stop processing when switching
     });
 
     currentCameraIndex = (currentCameraIndex + 1) % widget.cameras.length;
     await _setupCamera(currentCameraIndex);
   }
 
+  Future<void> _handleCameraImage(CameraImage image) async {
+    // Prevent re-entrancy: skip if already processing
+    if (_isProcessingFrame || !_shouldProcessImage) return;
+    if (!_isModelReady || _isModelLoading) return;
+
+    final now = DateTime.now();
+    if (_lastInferenceTime != null &&
+        now.difference(_lastInferenceTime!) < _inferenceInterval) {
+      return;
+    }
+
+    _isProcessingFrame = true;
+    _lastInferenceTime = now;
+
+    if (mounted) {
+      setState(() => displayText = 'Analyzing scene...');
+    }
+
+    try {
+      final result = await _vlmService.describeCameraImage(image);
+      if (!mounted) return;
+
+      setState(() {
+        displayText = result;
+        _modelError = null;
+      });
+    } catch (e) {
+      debugPrint('Inference error: $e');
+      if (!mounted) return;
+      setState(() {
+        _modelError = e.toString();
+        displayText = 'Cannot analyze scene';
+      });
+    } finally {
+      _isProcessingFrame = false;
+
+      // Add a small delay to let memory and GC settle
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+  }
+
   Future<void> toggleFlash() async {
     if (controller == null || !controller!.value.isInitialized) return;
-
     try {
       final newMode = isFlashOn ? FlashMode.off : FlashMode.torch;
       await controller!.setFlashMode(newMode);
       setState(() => isFlashOn = !isFlashOn);
     } catch (e) {
-      debugPrint('Error toggling flash: $e');
+      debugPrint('Flash toggle error: $e');
     }
   }
 
-  Future<void> takePicture() async {
-    if (controller == null ||
-        !controller!.value.isInitialized ||
-        controller!.value.isTakingPicture)
-      return;
-
-    try {
-      final image = await controller!.takePicture();
-      debugPrint('Picture taken: ${image.path}');
-      // TODO: ส่ง path ไปหน้าอื่นหรือ process ต่อ
-    } catch (e) {
-      debugPrint('Error taking picture: $e');
-    }
+  // start long press
+  void _onLongPressStart() {
+    setState(() {
+      _isLongPressing = true;
+      _shouldProcessImage = true;
+      displayText = 'Analyzing...';
+    });
   }
+
+  // stop long press
+  void _onLongPressEnd() {
+    setState(() {
+      _isLongPressing = false;
+      _shouldProcessImage = false;
+      if (!_isProcessingFrame) {
+        displayText = 'Press and hold shutter button to analyze';
+      }
+    });
+  }
+
+  // // capture photo
+  // Future<void> takePicture() async {
+  //   if (controller == null ||
+  //       !controller!.value.isInitialized ||
+  //       controller!.value.isTakingPicture) {
+  //     return;
+  //   }
+  //   try {
+  //     final image = await controller!.takePicture();
+  //     debugPrint('Picture taken: ${image.path}');
+  //     // แสดงข้อความแจ้งเตือน
+  //     if (mounted) {
+  //       setState(() => displayText = 'Picture saved!');
+  //       Future.delayed(const Duration(seconds: 2), () {
+  //         if (mounted && !_shouldProcessImage) {
+  //           setState(
+  //             () => displayText = 'Press and hold shutter button to analyze',
+  //           );
+  //         }
+  //       });
+  //     }
+  //   } catch (e) {
+  //     debugPrint('Picture error: $e');
+  //   }
+  // }
 
   void toggleSound() {
     setState(() => isSoundEnabled = !isSoundEnabled);
     debugPrint('Sound ${isSoundEnabled ? 'enabled' : 'disabled'}');
   }
 
-  void openSettings() {
-    debugPrint('Opening settings...');
-  }
-
   @override
   void dispose() {
-    controller?.dispose();
+    _shouldProcessImage = false; // stop processing when disposing
+    _disposeCamera();
+    _vlmService.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeCamera() async {
+    if (controller != null) {
+      try {
+        if (controller!.value.isStreamingImages) {
+          await controller!.stopImageStream();
+        }
+      } catch (_) {}
+
+      try {
+        await controller?.dispose();
+      } catch (_) {}
+
+      controller = null;
+    }
   }
 
   @override
@@ -155,7 +305,6 @@ class _CameraScreenState extends State<CameraScreen> {
   Widget _buildCameraView() {
     return Stack(
       children: [
-        // Camera Preview เต็มจอ
         SizedBox.expand(
           child: FittedBox(
             fit: BoxFit.cover,
@@ -182,7 +331,7 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _circleButton(Icons.settings, openSettings),
+          _circleButton(Icons.settings, () {}),
           _circleButton(
             isFlashOn ? Icons.flash_on : Icons.flash_off,
             toggleFlash,
@@ -205,50 +354,87 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Widget _buildTextDisplayBox() {
     return Positioned(
-      bottom: 120, // Position above the bottom controls
+      bottom: 120,
       left: 20,
       right: 20,
       child: Container(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.black.withOpacity(0.7),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withOpacity(0.3), width: 1),
+          border: Border.all(color: Colors.white24, width: 1),
         ),
-        child: Text(
-          displayText,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 16,
-            fontWeight: FontWeight.w400,
-          ),
-          textAlign: TextAlign.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_isModelLoading || (_isProcessingFrame && _shouldProcessImage))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: const [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                    SizedBox(width: 12),
+                    Text(
+                      'Processing...',
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            Text(
+              displayText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w400,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
   }
 
+  // long press shutter button
   Widget _shutterButton(VoidCallback onTap) {
     return GestureDetector(
-      onTap: onTap,
+      // onTap: onTap, // tap to take picture
+      onLongPressStart: (_) => _onLongPressStart(), // hold to start analyze
+      onLongPressEnd: (_) => _onLongPressEnd(), // release to stop analyze
       child: Container(
         width: 70,
         height: 70,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Colors.white,
-          border: Border.all(color: Colors.grey.shade400, width: 3),
-        ),
-        child: Center(
-          child: Container(
-            width: 60,
-            height: 60,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.white,
-            ),
+          color: _isLongPressing
+              ? Colors.green
+              : Colors.white, // green when analyzing
+          border: Border.all(
+            color: _isLongPressing ? Colors.greenAccent : Colors.grey.shade400,
+            width: 3,
           ),
+          boxShadow: _isLongPressing
+              ? [
+                  BoxShadow(
+                    color: Colors.green.withOpacity(0.5),
+                    blurRadius: 10,
+                    spreadRadius: 2,
+                  ),
+                ]
+              : null,
         ),
+        child: _isLongPressing
+            ? const Icon(Icons.visibility, color: Colors.white, size: 32)
+            : null,
       ),
     );
   }
@@ -263,10 +449,16 @@ class _CameraScreenState extends State<CameraScreen> {
         color: Colors.black,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceAround,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
+            // Flip camera button (if multiple cameras)
             if (widget.cameras.length > 1)
               _circleButton(Icons.flip_camera_ios, switchCamera),
-            _shutterButton(takePicture),
+
+            // Center shutter button for analyze (long press)
+            _shutterButton(() {}),
+
+            // Sound toggle
             _circleButton(
               isSoundEnabled ? Icons.volume_up : Icons.volume_off,
               toggleSound,
@@ -283,13 +475,10 @@ class _CameraScreenState extends State<CameraScreen> {
       color: Colors.black,
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-          const SizedBox(height: 16),
-          Text(
-            isSwitching ? 'Switching Camera...' : 'Loading Camera...',
-            style: const TextStyle(color: Colors.white),
-          ),
+        children: const [
+          CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+          SizedBox(height: 16),
+          Text('Loading Camera...', style: TextStyle(color: Colors.white)),
         ],
       ),
     );
@@ -336,7 +525,6 @@ class _CameraScreenState extends State<CameraScreen> {
             onPressed: () => openAppSettings(),
             child: const Text('Open Settings'),
           ),
-          const SizedBox(height: 12),
           TextButton(
             onPressed: _initializeCamera,
             child: const Text(
@@ -363,15 +551,12 @@ class _CameraScreenState extends State<CameraScreen> {
         width: size,
         height: size,
         decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-        child: iconSize > 0
-            ? Icon(icon, color: color, size: iconSize)
-            : null, // สำหรับ shutter button
+        child: Icon(icon, color: color, size: iconSize),
       ),
     );
   }
 }
 
-// Painter สำหรับ sight
 class _SightPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -383,17 +568,31 @@ class _SightPainter extends CustomPainter {
     const len = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // มุม
-    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(len, 0), paint);
-    canvas.drawLine(rect.topLeft, rect.topLeft + Offset(0, len), paint);
-    canvas.drawLine(rect.topRight, rect.topRight - Offset(len, 0), paint);
-    canvas.drawLine(rect.topRight, rect.topRight + Offset(0, len), paint);
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + Offset(len, 0), paint);
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft - Offset(0, len), paint);
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(len, 0), paint);
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - Offset(0, len), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
+    canvas.drawLine(rect.topRight, rect.topRight - const Offset(len, 0), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, len), paint);
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + const Offset(len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft - const Offset(0, len),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight - const Offset(len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight - const Offset(0, len),
+      paint,
+    );
 
-    // crosshair
     canvas.drawCircle(rect.center, 2, Paint()..color = Colors.white);
   }
 
