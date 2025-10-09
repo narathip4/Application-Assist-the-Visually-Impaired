@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'screens/camera_screen.dart';
 import 'services/model_loader.dart';
-import 'services/test_model_loader.dart';
+// import 'services/test_model_loader.dart';
 import 'screens/loading_screen.dart';
 
 /// Global list of available cameras.
