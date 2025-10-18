@@ -30,9 +30,7 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isModelReady = false;
   bool _isProcessingFrame = false;
   bool _isWarmUpRunning = false;
-  bool _canRetryWarmUp = true;
 
-  // press and hold
   bool _isLongPressing = false;
   bool _shouldProcessImage = false;
 
@@ -41,20 +39,40 @@ class _CameraScreenState extends State<CameraScreen> {
   String? errorMessage;
 
   DateTime? _lastInferenceTime;
-  final Duration _inferenceInterval = const Duration(
-    milliseconds: 1500,
-  ); // 1.5 seconds between inferences
+  final Duration _inferenceInterval = const Duration(milliseconds: 2000);
+
   @override
   void initState() {
     super.initState();
-    _vlmService = widget.vlmService ?? FastVlmService();
-    _initializeCamera();
-    _warmUpModel();
+
+    if (widget.vlmService == null) {
+      throw StateError(
+        'FastVlmService is required. Provide via CameraScreen(vlmService: ...).',
+      );
+    }
+    _vlmService = widget.vlmService!;
+
+    // warm up model
+    _warmUpModel().then((_) => _initializeCamera());
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    _disposeCamera(); // reset camera on hot reload
+  }
+
+  @override
+  void deactivate() {
+    // stop camera when navigating away
+    _disposeCamera();
+    super.deactivate();
   }
 
   Future<void> _warmUpModel() async {
     if (_isWarmUpRunning) return;
     _isWarmUpRunning = true;
+    if (!mounted) return;
     setState(() {
       _isModelLoading = true;
       _modelError = null;
@@ -62,11 +80,13 @@ class _CameraScreenState extends State<CameraScreen> {
 
     try {
       await _vlmService.ensureInitialized();
+      if (!mounted) return;
       setState(() {
         _isModelReady = true;
         displayText = 'Press and hold shutter button to analyze';
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isModelReady = false;
         _modelError = e.toString();
@@ -74,7 +94,9 @@ class _CameraScreenState extends State<CameraScreen> {
       });
     } finally {
       _isWarmUpRunning = false;
-      setState(() => _isModelLoading = false);
+      if (mounted) {
+        setState(() => _isModelLoading = false);
+      }
     }
   }
 
@@ -93,6 +115,7 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     } catch (e) {
       debugPrint('Camera permission error: $e');
+      if (!mounted) return;
       setState(() => errorMessage = 'Camera permission error');
     }
   }
@@ -100,17 +123,23 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _setupCamera(int index) async {
     if (widget.cameras.isEmpty) return;
 
+    // close previous controller
     if (controller != null) {
       try {
         if (controller!.value.isStreamingImages) {
           await controller!.stopImageStream();
         }
       } catch (_) {}
-      await controller?.dispose();
+      try {
+        await controller?.dispose();
+      } catch (_) {}
       controller = null;
     }
 
-    await Future.delayed(const Duration(milliseconds: 300));
+    if (!mounted) return;
+    await controller?.stopImageStream().catchError((_) {});
+
+    await Future.delayed(const Duration(milliseconds: 200));
 
     final newController = CameraController(
       widget.cameras[index],
@@ -126,8 +155,14 @@ class _CameraScreenState extends State<CameraScreen> {
         return;
       }
 
-      await newController.setFlashMode(FlashMode.off);
+      try {
+        await newController.setFlashMode(FlashMode.off);
+      } catch (_) {}
 
+      if (!mounted) {
+        await newController.dispose();
+        return;
+      }
       setState(() {
         controller = newController;
         isInitialized = true;
@@ -148,10 +183,13 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> switchCamera() async {
     if (widget.cameras.length < 2 || isSwitching) return;
+    if (!mounted) return;
+
     setState(() {
       isSwitching = true;
       isInitialized = false;
       _shouldProcessImage = false; // stop processing when switching
+      displayText = 'Switching camera...';
     });
 
     currentCameraIndex = (currentCameraIndex + 1) % widget.cameras.length;
@@ -159,25 +197,33 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _handleCameraImage(CameraImage image) async {
-    // Prevent re-entrancy: skip if already processing
-    if (_isProcessingFrame || !_shouldProcessImage) return;
+    if (!mounted || controller == null || !controller!.value.isInitialized) {
+      return;
+    }
+    if (_isProcessingFrame || !_shouldProcessImage) {
+      await Future.delayed(const Duration(milliseconds: 50));
+      return;
+    }
     if (!_isModelReady || _isModelLoading) return;
 
+    // throttle frames
     final now = DateTime.now();
     if (_lastInferenceTime != null &&
         now.difference(_lastInferenceTime!) < _inferenceInterval) {
-      return;
+      return; // skip frame
     }
-
-    _isProcessingFrame = true;
     _lastInferenceTime = now;
 
+    _isProcessingFrame = true;
     if (mounted) {
       setState(() => displayText = 'Analyzing scene...');
     }
 
     try {
-      final result = await _vlmService.describeCameraImage(image);
+      final result = await _vlmService.describeCameraImage(
+        image,
+        maxNewTokens: 32, // 32 64
+      );
       if (!mounted) return;
 
       setState(() {
@@ -193,25 +239,31 @@ class _CameraScreenState extends State<CameraScreen> {
       });
     } finally {
       _isProcessingFrame = false;
-
-      // Add a small delay to let memory and GC settle
-      await Future.delayed(const Duration(milliseconds: 150));
+      await Future.delayed(const Duration(milliseconds: 60));
     }
   }
 
   Future<void> toggleFlash() async {
-    if (controller == null || !controller!.value.isInitialized) return;
+    final c = controller;
+    if (c == null || !c.value.isInitialized) return;
+
     try {
       final newMode = isFlashOn ? FlashMode.off : FlashMode.torch;
-      await controller!.setFlashMode(newMode);
+      await c.setFlashMode(newMode);
+      if (!mounted) return;
       setState(() => isFlashOn = !isFlashOn);
     } catch (e) {
       debugPrint('Flash toggle error: $e');
     }
   }
 
-  // start long press
+  void toggleSound() {
+    if (!mounted) return;
+    setState(() => isSoundEnabled = !isSoundEnabled);
+  }
+
   void _onLongPressStart() {
+    if (!mounted) return;
     setState(() {
       _isLongPressing = true;
       _shouldProcessImage = true;
@@ -219,8 +271,8 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
-  // stop long press
   void _onLongPressEnd() {
+    if (!mounted) return;
     setState(() {
       _isLongPressing = false;
       _shouldProcessImage = false;
@@ -230,59 +282,29 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
-  // // capture photo
-  // Future<void> takePicture() async {
-  //   if (controller == null ||
-  //       !controller!.value.isInitialized ||
-  //       controller!.value.isTakingPicture) {
-  //     return;
-  //   }
-  //   try {
-  //     final image = await controller!.takePicture();
-  //     debugPrint('Picture taken: ${image.path}');
-  //     // แสดงข้อความแจ้งเตือน
-  //     if (mounted) {
-  //       setState(() => displayText = 'Picture saved!');
-  //       Future.delayed(const Duration(seconds: 2), () {
-  //         if (mounted && !_shouldProcessImage) {
-  //           setState(
-  //             () => displayText = 'Press and hold shutter button to analyze',
-  //           );
-  //         }
-  //       });
-  //     }
-  //   } catch (e) {
-  //     debugPrint('Picture error: $e');
-  //   }
-  // }
-
-  void toggleSound() {
-    setState(() => isSoundEnabled = !isSoundEnabled);
-    debugPrint('Sound ${isSoundEnabled ? 'enabled' : 'disabled'}');
-  }
-
   @override
   void dispose() {
-    _shouldProcessImage = false; // stop processing when disposing
+    _shouldProcessImage = false;
     _disposeCamera();
     _vlmService.dispose();
     super.dispose();
   }
 
   Future<void> _disposeCamera() async {
-    if (controller != null) {
-      try {
-        if (controller!.value.isStreamingImages) {
-          await controller!.stopImageStream();
-        }
-      } catch (_) {}
+    final c = controller;
+    if (c == null) return;
 
-      try {
-        await controller?.dispose();
-      } catch (_) {}
+    try {
+      if (c.value.isStreamingImages) {
+        await c.stopImageStream();
+      }
+    } catch (_) {}
 
-      controller = null;
-    }
+    try {
+      await c.dispose();
+    } catch (_) {}
+
+    controller = null;
   }
 
   @override
@@ -368,11 +390,11 @@ class _CameraScreenState extends State<CameraScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (_isModelLoading || (_isProcessingFrame && _shouldProcessImage))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: const [
+                  children: [
                     SizedBox(
                       width: 18,
                       height: 18,
@@ -404,20 +426,16 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  // long press shutter button
   Widget _shutterButton(VoidCallback onTap) {
     return GestureDetector(
-      // onTap: onTap, // tap to take picture
-      onLongPressStart: (_) => _onLongPressStart(), // hold to start analyze
-      onLongPressEnd: (_) => _onLongPressEnd(), // release to stop analyze
+      onLongPressStart: (_) => _onLongPressStart(),
+      onLongPressEnd: (_) => _onLongPressEnd(),
       child: Container(
         width: 70,
         height: 70,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: _isLongPressing
-              ? Colors.green
-              : Colors.white, // green when analyzing
+          color: _isLongPressing ? Colors.green : Colors.white,
           border: Border.all(
             color: _isLongPressing ? Colors.greenAccent : Colors.grey.shade400,
             width: 3,
@@ -451,14 +469,9 @@ class _CameraScreenState extends State<CameraScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceAround,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // Flip camera button (if multiple cameras)
             if (widget.cameras.length > 1)
               _circleButton(Icons.flip_camera_ios, switchCamera),
-
-            // Center shutter button for analyze (long press)
             _shutterButton(() {}),
-
-            // Sound toggle
             _circleButton(
               isSoundEnabled ? Icons.volume_up : Icons.volume_off,
               toggleSound,
@@ -473,9 +486,9 @@ class _CameraScreenState extends State<CameraScreen> {
     return Container(
       alignment: Alignment.center,
       color: Colors.black,
-      child: Column(
+      child: const Column(
         mainAxisSize: MainAxisSize.min,
-        children: const [
+        children: [
           CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
           SizedBox(height: 16),
           Text('Loading Camera...', style: TextStyle(color: Colors.white)),
