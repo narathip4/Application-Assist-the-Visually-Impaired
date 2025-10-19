@@ -7,12 +7,6 @@ import '../services/tokenizer_service.dart';
 import '../services/fast_vlm_service.dart';
 import 'camera_screen.dart';
 
-/// Loading screen
-/// 1) Ensures ONNX model files exist
-/// 2) Loads tokenizer.json
-/// 3) Creates FastVlmService with tokenizer (not initialized yet)
-/// 4) Detects cameras
-/// 5) Navigates to CameraScreen
 class LoadingScreen extends StatefulWidget {
   const LoadingScreen({super.key});
 
@@ -31,31 +25,47 @@ class _LoadingScreenState extends State<LoadingScreen>
   @override
   void initState() {
     super.initState();
+
+    // Simple pulsing animation for loading indicator
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
     )..repeat(reverse: true);
     _pulse = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
+
+    // Begin initialization sequence
     _bootstrap();
   }
 
+  /// Performs all asynchronous setup steps sequentially.
   Future<void> _bootstrap() async {
     try {
-      // 1) Ensure models
+      // Download or verify ONNX models
       setState(() => _status = 'Downloading and validating model files...');
-      await ModelLoader.ensureModelsDownloaded();
+      await ModelLoader.ensureModelsDownloaded(
+        onProgress:
+            (String fileName, double progress, int received, int total) {
+              if (!mounted) return;
+              final percent = total > 0
+                  ? (received / total * 100).toStringAsFixed(1)
+                  : '';
+              setState(() => _status = 'Downloading $fileName... $percent%');
+            },
+      );
 
-      // 2) Load tokenizer
+      // Load tokenizer configuration from disk
       setState(() => _status = 'Loading tokenizer...');
       final paths = await ModelLoader.getAllModelPaths();
       final tokenizerPath = paths['tokenizer.json']!;
       final tok = await TokenizerService.fromFile(tokenizerPath);
 
-      // 3) Adapter to Vocab and create service
+      // Wrap tokenizer as a Vocab adapter for the VLM service
       final vocab = _TokenizerAdapter(tok);
-      final vlm = FastVlmService(tokenizer: vocab); // not initialized yet
+      final vlm = FastVlmService(
+        tokenizer: vocab,
+      ); // Lazy-init; not yet started
 
-      // 4) Detect cameras
+      // Detect available cameras
       setState(() => _status = 'Detecting cameras...');
       final cams = await availableCameras();
       if (cams.isEmpty) {
@@ -64,13 +74,14 @@ class _LoadingScreenState extends State<LoadingScreen>
 
       if (!mounted) return;
 
-      // 5) Navigate
+      // Navigate to main camera screen once initialization completes
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => CameraScreen(cameras: cams, vlmService: vlm),
         ),
       );
     } catch (e) {
+      // Capture and display errors gracefully
       if (!mounted) return;
       setState(() => _error = e.toString());
     }
@@ -82,6 +93,8 @@ class _LoadingScreenState extends State<LoadingScreen>
     super.dispose();
   }
 
+  /// Main UI build method.
+  /// Displays a loading animation or an error recovery screen.
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -101,6 +114,7 @@ class _LoadingScreenState extends State<LoadingScreen>
     );
   }
 
+  /// Displays the loading indicator with a pulsing icon and current status.
   Widget _buildProgress() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -125,6 +139,7 @@ class _LoadingScreenState extends State<LoadingScreen>
     );
   }
 
+  /// Displays an error message and recovery options.
   Widget _buildError() {
     final msg = _error ?? 'Unknown error';
     return Column(
@@ -142,11 +157,13 @@ class _LoadingScreenState extends State<LoadingScreen>
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Exits app entirely
             TextButton(
               onPressed: () => SystemNavigator.pop(),
               child: const Text('Exit'),
             ),
             const SizedBox(width: 12),
+            // Retry initialization
             ElevatedButton(
               onPressed: () {
                 setState(() => _error = null);
@@ -161,7 +178,9 @@ class _LoadingScreenState extends State<LoadingScreen>
   }
 }
 
-/// Nominal-typing adapter: TokenizerService → Vocab
+/// Adapter class for converting a `TokenizerService` into a `Vocab` interface.
+///
+/// Provides nominal typing compatibility with `FastVlmService` requirements.
 class _TokenizerAdapter implements Vocab {
   final TokenizerService _t;
   _TokenizerAdapter(this._t);

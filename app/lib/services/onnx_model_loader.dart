@@ -7,6 +7,13 @@ import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
 
+typedef DownloadProgressCallback =
+    void Function({
+      required String fileName,
+      required int received,
+      required int total,
+    });
+
 class ModelLoader {
   static const String _repo = 'onnx-community/FastVLM-0.5B-ONNX';
   static const String _base = 'https://huggingface.co';
