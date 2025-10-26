@@ -14,9 +14,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool speech = true;
   bool subtitle = true;
   double speechSpeed = 0.5;
-  String selectedModel = 'FastVLM 0.5B-ONNX (Default)';
+  String selectedModel = 'FastVLM 0.5B (Default)';
 
-  final List<String> models = ['FastVLM 0.5B-ONNX (Default)'];
+  final List<String> models = ['FastVLM 0.5B (Default)'];
 
   @override
   void initState() {
