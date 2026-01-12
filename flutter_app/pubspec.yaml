@@ -34,11 +34,11 @@ dependencies:
   permission_handler: ^12.0.1
   image: ^4.1.7
   path_provider: ^2.1.4
-  http: ^1.1.0
   crypto: ^3.0.3
-  flutter_onnxruntime: ^1.5.2 
   camera_android: ^0.10.10+10
   shared_preferences: ^2.3.2
+  http: ^1.2.0
+  http_parser: ^4.0.2
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.

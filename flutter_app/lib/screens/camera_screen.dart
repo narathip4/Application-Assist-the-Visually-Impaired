@@ -1,14 +1,14 @@
 import 'dart:typed_data';
+import 'package:app/app/config.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../isolates/yuv_to_jpeg_isolate.dart';
 import '../screens/setting_screen.dart';
-import '../services/fast_vlm_service.dart';
-import '../utils/image_utils.dart';
+import '../services/vlm/fast_vlm_service.dart';
 
-/// Main camera screen with integrated VLM (Vision-Language Model) analysis.
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
   final FastVlmService? vlmService;
@@ -38,14 +38,19 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isSettingUp = false;
   bool _isLongPressing = false;
   bool _shouldProcessImage = false;
+  bool _isDisposed = false;
 
   String displayText = 'Press and hold shutter button to analyze';
   String? errorMessage;
-  String? _modelError;
+  // String? _modelError;
 
   DateTime? _lastInferenceTime;
-  final Duration _inferenceInterval = const Duration(milliseconds: 1000);
-  int _frameCounter = 0;
+
+  // Cloud inference: do NOT run too frequently
+  final Duration _inferenceInterval = AppConfig.inferenceInterval;
+
+  // int _frameCounter = 0;
+  String? _lastResult;
 
   @override
   void initState() {
@@ -63,11 +68,11 @@ class _CameraScreenState extends State<CameraScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) async {
     final c = controller;
     if (c == null || !c.value.isInitialized) return;
-    if (state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused) {
       await _disposeCamera();
     } else if (state == AppLifecycleState.resumed) {
       if (mounted && !_isSettingUp) {
-        _setupCamera(currentCameraIndex);
+        await _setupCamera(currentCameraIndex);
       }
     }
   }
@@ -84,18 +89,18 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  @override
-  void deactivate() {
-    _disposeCamera();
-    super.deactivate();
-  }
+  // @override
+  // void deactivate() {
+  //   _disposeCamera();
+  //   super.deactivate();
+  // }
 
   Future<void> _warmUpModel() async {
     if (_isWarmUpRunning || !mounted) return;
     _isWarmUpRunning = true;
     setState(() {
       _isModelLoading = true;
-      _modelError = null;
+      // _modelError = null;
     });
 
     try {
@@ -109,8 +114,8 @@ class _CameraScreenState extends State<CameraScreen>
       if (!mounted) return;
       setState(() {
         _isModelReady = false;
-        _modelError = e.toString();
-        displayText = 'Model load failed';
+        // _modelError = e.toString();
+        displayText = 'Model init failed';
       });
     } finally {
       _isWarmUpRunning = false;
@@ -138,6 +143,8 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _setupCamera(int index) async {
+    if (_isDisposed) return;
+
     if (widget.cameras.isEmpty || _isSettingUp) return;
     _isSettingUp = true;
     try {
@@ -153,6 +160,11 @@ class _CameraScreenState extends State<CameraScreen>
       );
 
       await newController.initialize();
+      if (!mounted || _isDisposed) {
+        await newController.dispose();
+        return;
+      }
+      
       await newController.setFlashMode(FlashMode.off);
       if (!mounted) {
         await newController.dispose();
@@ -194,13 +206,22 @@ class _CameraScreenState extends State<CameraScreen>
     await _setupCamera(currentCameraIndex);
   }
 
-  static Future<void> _preprocessWrapper(Map<String, dynamic> args) async {
-    final CameraImage image = args['image'];
-    final int size = args['size'];
-    ImageUtils.preprocess(image, size);
-  }
+  // // Isolate worker: CameraImage(YUV420) -> JPEG bytes (resized)
+  // static Uint8List _toJpegWrapper(Map<String, dynamic> args) {
+  //   final CameraImage image = args['image'] as CameraImage;
+  //   final int maxSide = args['maxSide'] as int;
+  //   final int jpegQuality = args['jpegQuality'] as int;
+
+  //   return ImageUtils.cameraImageToJpeg(
+  //     image,
+  //     maxSide: maxSide,
+  //     jpegQuality: jpegQuality,
+  //   );
+  // }
 
   Future<void> _handleCameraImage(CameraImage image) async {
+    if (_isDisposed) return;
+
     if (!mounted ||
         controller == null ||
         !controller!.value.isInitialized ||
@@ -208,27 +229,62 @@ class _CameraScreenState extends State<CameraScreen>
         _isProcessingFrame ||
         !_shouldProcessImage ||
         !_isModelReady ||
-        _isModelLoading)
+        _isModelLoading) {
       return;
+    }
 
-    if (++_frameCounter % 3 != 0) return;
+    // reduce CPU load
+    // if (++_frameCounter % 6 != 0) return;
+
+    // throttle requests
     final now = DateTime.now();
     if (_lastInferenceTime != null &&
-        now.difference(_lastInferenceTime!) < _inferenceInterval)
+        now.difference(_lastInferenceTime!) < _inferenceInterval) {
       return;
-    _lastInferenceTime = now;
+    }
 
+    // reserve slot immediately (prevents overlap)
+    _lastInferenceTime = now;
     _isProcessingFrame = true;
     if (mounted) setState(() => displayText = 'Analyzing scene...');
 
     try {
-      await compute(_preprocessWrapper, {'image': image, 'size': 224});
-      final result = await _vlmService.describeCameraImage(
-        image,
-        maxNewTokens: 16,
+      final jpegBytes = await compute(yuvToJpegIsolate, {
+        'image': image,
+        'maxSide': AppConfig.jpegMaxSide,
+        'jpegQuality': AppConfig.jpegQuality,
+      });
+
+      // convert to jpeg in isolate
+      // final Uint8List jpegBytes = await compute(_toJpegWrapper, {
+      //   'image': image,
+      //   'maxSide': 512,
+      //   'jpegQuality': 70,
+      // });
+
+      final result = await _vlmService.describeJpegBytes(
+        jpegBytes,
+        prompt: AppConfig.prompt,
+        maxNewTokens: AppConfig.maxNewTokens,
       );
+
       if (!mounted) return;
-      setState(() => displayText = result);
+
+      final cleaned = result.trim();
+      if (cleaned.isNotEmpty) {
+        // avoid repeating the same message over and over
+        if (cleaned != _lastResult) {
+          _lastResult = cleaned;
+          setState(() => displayText = cleaned);
+
+          // Optional: TTS hook point (if you add it later)
+          // if (isSoundEnabled) await _tts.speak(cleaned);
+        } else {
+          setState(() => displayText = cleaned);
+        }
+      } else {
+        setState(() => displayText = 'No result');
+      }
     } catch (e) {
       debugPrint('Inference error: $e');
       if (mounted) setState(() => displayText = 'Cannot analyze scene');
@@ -271,6 +327,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _shouldProcessImage = false;
     _disposeCamera();
@@ -281,11 +338,14 @@ class _CameraScreenState extends State<CameraScreen>
     final c = controller;
     controller = null;
     if (c == null) return;
+
     try {
       if (c.value.isStreamingImages) {
         await c.stopImageStream();
-        await Future.delayed(const Duration(milliseconds: 100));
       }
+    } catch (_) {}
+
+    try {
       await c.dispose();
     } catch (_) {}
   }

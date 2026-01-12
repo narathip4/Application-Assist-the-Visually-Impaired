@@ -44,8 +44,8 @@
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<key>NSCameraUsageDescription</key>
-	<string>This app needs camera access to take photos</string>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs camera access to describe your surroundings.</string>
 </dict>
 </plist>
