@@ -11,15 +11,12 @@ class AppConfig {
   static const int jpegQuality = 70;
 
   static const String prompt = '''
-You are assisting a visually impaired user.
-Reply with ONE short sentence only.
-Describe nearby obstacles directly in front of the camera that the user may bump into (e.g., wall, door, person, chair, steps).
-If nothing is close, reply exactly: "Clear ahead."
-No refusal. No extra text.
+Describe what is visible in the image in one neutral sentence.
+Respond concisely and clearly, focusing on key details relevant for a visually impaired user. 
 ''';
 
   static const String fallbackText = 'Clear ahead.';
 
   // Throttling (near real-time)
-  static const Duration inferenceInterval = Duration(milliseconds: 900);
+  static const Duration inferenceInterval = Duration(milliseconds: 700);
 }
