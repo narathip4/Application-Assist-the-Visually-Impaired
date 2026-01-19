@@ -1,79 +1,65 @@
 // lib/isolates/yuv_to_jpeg_isolate.dart
 //
-// Purpose: Convert CameraImage (YUV420) -> JPEG bytes in an isolate.
-// Use with `compute(yuvToJpegIsolate, {...})`.
-//
-// Requires: pubspec.yaml -> dependencies: image: ^4.x
-//
-// Note: This is CPU-heavy; always run in an isolate, not on the UI thread.
+// Convert YUV420 planes (bytes snapshot) -> JPEG bytes in an isolate.
+// Safe for compute(): only passes primitives + Uint8List.
 
 import 'dart:typed_data';
-import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
-
-class YuvToJpegArgs {
-  final CameraImage image;
-  final int maxSide; // e.g. 512
-  final int jpegQuality; // e.g. 70
-
-  const YuvToJpegArgs({
-    required this.image,
-    required this.maxSide,
-    required this.jpegQuality,
-  });
-
-  // compute() only accepts simple types; we pass Map in practice.
-  static Map<String, dynamic> toMap(YuvToJpegArgs a) => {
-        'image': a.image,
-        'maxSide': a.maxSide,
-        'jpegQuality': a.jpegQuality,
-      };
-}
 
 /// Top-level function required by `compute`.
 Uint8List yuvToJpegIsolate(Map<String, dynamic> args) {
-  final CameraImage cameraImage = args['image'] as CameraImage;
+  final int width = args['width'] as int;
+  final int height = args['height'] as int;
+
+  final Uint8List yBytes = args['y'] as Uint8List;
+  final Uint8List uBytes = args['u'] as Uint8List;
+  final Uint8List vBytes = args['v'] as Uint8List;
+
+  final int yRowStride = args['yRowStride'] as int;
+  final int uvRowStride = args['uvRowStride'] as int;
+  final int uvPixelStride = (args['uvPixelStride'] as int?) ?? 1;
+
   final int maxSide = (args['maxSide'] as int?) ?? 512;
   final int jpegQuality = (args['jpegQuality'] as int?) ?? 70;
+  final int rotation = (args['rotation'] as int?) ?? 0; // 0/90/180/270
 
-  return _cameraImageToJpeg(cameraImage, maxSide: maxSide, jpegQuality: jpegQuality);
+  final rgb = _yuv420ToRgbImage(
+    width: width,
+    height: height,
+    yBytes: yBytes,
+    uBytes: uBytes,
+    vBytes: vBytes,
+    yRowStride: yRowStride,
+    uvRowStride: uvRowStride,
+    uvPixelStride: uvPixelStride,
+  );
+
+  final resized = _resizeMaxSide(rgb, maxSide);
+  final rotated = _applyRotation(resized, rotation);
+
+  final jpg = img.encodeJpg(rotated, quality: jpegQuality);
+  return Uint8List.fromList(jpg);
 }
 
-Uint8List _cameraImageToJpeg(
-  CameraImage cameraImage, {
-  required int maxSide,
-  required int jpegQuality,
+img.Image _yuv420ToRgbImage({
+  required int width,
+  required int height,
+  required Uint8List yBytes,
+  required Uint8List uBytes,
+  required Uint8List vBytes,
+  required int yRowStride,
+  required int uvRowStride,
+  required int uvPixelStride,
 }) {
-  if (cameraImage.format.group != ImageFormatGroup.yuv420) {
-    throw StateError('Unsupported image format: ${cameraImage.format.group}');
-  }
-
-  final width = cameraImage.width;
-  final height = cameraImage.height;
-
-  final yPlane = cameraImage.planes[0];
-  final uPlane = cameraImage.planes[1];
-  final vPlane = cameraImage.planes[2];
-
-  final yBytes = yPlane.bytes;
-  final uBytes = uPlane.bytes;
-  final vBytes = vPlane.bytes;
-
-  final yRowStride = yPlane.bytesPerRow;
-  final uvRowStride = uPlane.bytesPerRow;
-  final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-
-  // Build RGB image
   final out = img.Image(width: width, height: height);
 
   for (int y = 0; y < height; y++) {
-    final yRow = y * yRowStride;
-    final uvRow = (y >> 1) * uvRowStride;
+    final int yRow = y * yRowStride;
+    final int uvRow = (y >> 1) * uvRowStride;
 
     for (int x = 0; x < width; x++) {
-      final yIndex = yRow + x;
-
-      final uvIndex = uvRow + (x >> 1) * uvPixelStride;
+      final int yIndex = yRow + x;
+      final int uvIndex = uvRow + (x >> 1) * uvPixelStride;
 
       final int yp = yBytes[yIndex];
       final int up = uBytes[uvIndex];
@@ -95,12 +81,7 @@ Uint8List _cameraImageToJpeg(
     }
   }
 
-  // Resize to maxSide (keep aspect ratio)
-  final resized = _resizeMaxSide(out, maxSide);
-
-  // Encode JPEG
-  final jpg = img.encodeJpg(resized, quality: jpegQuality);
-  return Uint8List.fromList(jpg);
+  return out;
 }
 
 img.Image _resizeMaxSide(img.Image input, int maxSide) {
@@ -115,4 +96,18 @@ img.Image _resizeMaxSide(img.Image input, int maxSide) {
   final nh = (h * scale).round();
 
   return img.copyResize(input, width: nw, height: nh);
+}
+
+img.Image _applyRotation(img.Image input, int rotationDegrees) {
+  final r = ((rotationDegrees % 360) + 360) % 360;
+  switch (r) {
+    case 90:
+      return img.copyRotate(input, angle: 90);
+    case 180:
+      return img.copyRotate(input, angle: 180);
+    case 270:
+      return img.copyRotate(input, angle: 270);
+    default:
+      return input;
+  }
 }

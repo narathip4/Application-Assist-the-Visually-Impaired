@@ -1,6 +1,5 @@
 // lib/screens/camera_screen.dart
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:app/app/config.dart';
 import 'package:camera/camera.dart';
@@ -11,6 +10,9 @@ import 'package:permission_handler/permission_handler.dart';
 import '../isolates/yuv_to_jpeg_isolate.dart';
 import '../screens/setting_screen.dart';
 import '../services/vlm/fast_vlm_service.dart';
+import '../services/tts/tts_service.dart';
+import '../services/tts/speak_policy.dart';
+import 'dart:typed_data';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -29,52 +31,46 @@ class _CameraScreenState extends State<CameraScreen>
   int _currentCameraIndex = 0;
   bool _isInitialized = false;
   bool _isPermissionGranted = false;
-
-  // Persist user flash preference across camera switches
   FlashMode _desiredFlashMode = FlashMode.off;
 
   // VLM
   late final FastVlmService _vlmService;
-  bool _isModelLoading = false;
   bool _isModelReady = false;
 
+  // TTS
+  late final TtsService _ttsService;
+  late final SpeakPolicy _speakPolicy;
+  bool _isTtsEnabled = true;
+
   // Processing control
-  bool _shouldProcessImage = true; // auto-start enabled
-  bool _isProcessingFrame = false;
+  bool _shouldProcessImage = true;
+  bool _isProcessingFrame = false; // NEW: Track if currently processing
 
   // UI
-  final ValueNotifier<String> _displayText = ValueNotifier<String>(
-    'Initializing...',
-  );
+  final ValueNotifier<String> _displayText =
+      ValueNotifier<String>('Initializing...');
   String? _errorMessage;
-  String? _lastResult;
 
-  // Lifecycle + cancellation
+  // Latest frame (latest-only) - NOW ONLY STORES REFERENCE
+  CameraImage? _latestFrame;
+  int _latestFrameTimestamp = 0;
+
+  // Lifecycle / cancellation
   bool _isDisposed = false;
-  Completer<void>? _processingCancellation;
-
-  // Serialize camera setup safely
-  Future<void> _setupChain = Future.value();
-
-  CameraImage? _latestImage;
-  int _latestGen = 0;
-  bool _inferenceLoopRunning = false;
-
-  // Throttle + load shedding
-  DateTime? _lastInferenceTime;
-  int _frameCount = 0;
-
-  // Stream generation (drop callbacks from old streams immediately)
   int _streamGen = 0;
 
-  // Temporary message timer
-  Timer? _tmpMsgTimer;
-  static const Duration _tmpMsgDuration = Duration(seconds: 3);
+  Uint8List? _lastSentImageBytes;
+
+  // Serialize setup
+  Future<void> _setupChain = Future.value();
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    _ttsService = TtsService();
+    _speakPolicy = SpeakPolicy(cooldown: const Duration(seconds: 2));
 
     final svc = widget.vlmService;
     if (svc == null) {
@@ -87,12 +83,21 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _initializeApp() async {
-    await Future.wait([_requestCameraPermission(), _warmUpModel()]);
+    try {
+      await Future.wait([
+        _requestCameraPermission(),
+        _warmUpModel(),
+        _ttsService.init(),
+      ]);
 
-    if (_isDisposed) return;
+      if (_isDisposed) return;
 
-    if (_isPermissionGranted && widget.cameras.isNotEmpty) {
-      await _ensureCameraInitialized(_currentCameraIndex);
+      if (_isPermissionGranted && widget.cameras.isNotEmpty) {
+        await _ensureCameraInitialized(_currentCameraIndex);
+      }
+    } catch (e) {
+      debugPrint('[CameraScreen] Initialization error: $e');
+      _setError('Failed to initialize app');
     }
   }
 
@@ -101,11 +106,9 @@ class _CameraScreenState extends State<CameraScreen>
     if (_isDisposed) return;
 
     if (state == AppLifecycleState.paused) {
+      await _ttsService.stop();
       await _disposeCamera();
-      return;
-    }
-
-    if (state == AppLifecycleState.resumed) {
+    } else if (state == AppLifecycleState.resumed) {
       if (_isPermissionGranted && widget.cameras.isNotEmpty) {
         await _ensureCameraInitialized(_currentCameraIndex);
       }
@@ -121,39 +124,27 @@ class _CameraScreenState extends State<CameraScreen>
         _isPermissionGranted = status == PermissionStatus.granted;
       });
 
-      if (!_isPermissionGranted) _setError('Camera permission denied');
+      if (!_isPermissionGranted) {
+        _setError('Camera permission denied');
+      }
     } catch (e) {
-      debugPrint('Camera permission error: $e');
+      debugPrint('[CameraScreen] Permission error: $e');
       _setError('Failed to request camera permission');
     }
   }
 
   Future<void> _warmUpModel() async {
-    if (_isDisposed || !mounted) return;
-
-    setState(() {
-      _isModelLoading = true;
-      _errorMessage = null;
-    });
-
     _displayText.value = 'Loading AI model...';
-
     try {
       await _vlmService.ensureInitialized();
       if (!mounted || _isDisposed) return;
-
       setState(() => _isModelReady = true);
-      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Paused';
+      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
     } catch (e) {
-      debugPrint('Model initialization error: $e');
+      debugPrint('[CameraScreen] Model warmup error: $e');
       if (!mounted || _isDisposed) return;
-
       setState(() => _isModelReady = false);
-      _setError('AI model failed to load: ${e.toString()}');
-    } finally {
-      if (mounted && !_isDisposed) {
-        setState(() => _isModelLoading = false);
-      }
+      _setError('AI model failed to load');
     }
   }
 
@@ -162,7 +153,8 @@ class _CameraScreenState extends State<CameraScreen>
       if (_isDisposed) return;
       if (_isInitialized &&
           _currentCameraIndex == cameraIndex &&
-          _controller != null) {
+          _controller != null &&
+          _controller!.value.isInitialized) {
         return;
       }
       await _setupCamera(cameraIndex);
@@ -179,7 +171,7 @@ class _CameraScreenState extends State<CameraScreen>
 
       final newController = CameraController(
         widget.cameras[cameraIndex],
-        ResolutionPreset.medium, // Better balance of quality and performance
+        ResolutionPreset.medium, // CHANGED: medium instead of high for better performance
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -192,45 +184,155 @@ class _CameraScreenState extends State<CameraScreen>
 
       await newController.setFlashMode(_desiredFlashMode);
 
-      // New stream generation + new cancellation token
       _streamGen++;
-      final old = _processingCancellation;
-      if (old != null && !old.isCompleted) old.complete();
-      final int myGen = _streamGen;
-      _processingCancellation = Completer<void>();
-      final localCancel = _processingCancellation;
+      final myGen = _streamGen;
 
-      setState(() {
+      if (mounted && !_isDisposed) {
+        setState(() {
+          _controller = newController;
+          _currentCameraIndex = cameraIndex;
+          _isInitialized = true;
+          _errorMessage = null;
+        });
+      } else {
         _controller = newController;
         _currentCameraIndex = cameraIndex;
         _isInitialized = true;
         _errorMessage = null;
-      });
+      }
 
-      await newController.startImageStream((img) {
-        if (_isDisposed) return;
-        if (myGen != _streamGen) return;
+      // Start image stream with optimized callback
+      await newController.startImageStream((CameraImage img) {
+        if (_isDisposed || myGen != _streamGen) return;
 
-        final cancel = localCancel;
-        if (cancel == null || cancel.isCompleted) return;
-
-        // เก็บ “เฟรมล่าสุด” ไว้เฉย ๆ
-        _latestImage = img;
-        _latestGen++;
-
-        // ถ้ายังไม่มี loop ให้เริ่ม
-        if (_shouldProcessImage && !_inferenceLoopRunning) {
-          _runLatestOnlyLoop(cancel);
+        // CRITICAL FIX: Skip if already processing
+        if (_isProcessingFrame || !_shouldProcessImage || !_isModelReady) {
+          return;
         }
+
+        // Store reference only (no copying yet)
+        _latestFrame = img;
+        _latestFrameTimestamp = DateTime.now().millisecondsSinceEpoch;
+
+        // Trigger processing
+        _processLatestFrame();
       });
 
-      _shouldProcessImage = true;
-      _displayText.value = 'Analyzing...';
+      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
     } catch (e) {
-      debugPrint('Camera setup error: $e');
-      if (mounted && !_isDisposed) {
-        setState(() => _isInitialized = false);
-        _setError('Camera initialization failed: ${e.toString()}');
+      debugPrint('[CameraScreen] Camera setup error: $e');
+      _setError('Camera initialization failed');
+    }
+  }
+
+  Future<void> _processLatestFrame() async {
+    if (_isProcessingFrame || _latestFrame == null) return;
+    if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
+
+    _isProcessingFrame = true;
+
+    String? lastSay;
+    int consecutiveErrors = 0;
+    const maxConsecutiveErrors = 3;
+
+    try {
+      final img = _latestFrame!;
+      final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
+
+      // Copy YUV data NOW (only when we're actually processing)
+      final yPlane = img.planes[0];
+      final uPlane = img.planes[1];
+      final vPlane = img.planes[2];
+
+      // Convert YUV -> JPEG off main thread
+      final jpegBytes = await compute(yuvToJpegIsolate, <String, dynamic>{
+        'width': img.width,
+        'height': img.height,
+        'y': Uint8List.fromList(yPlane.bytes),
+        'u': Uint8List.fromList(uPlane.bytes),
+        'v': Uint8List.fromList(vPlane.bytes),
+        'yRowStride': yPlane.bytesPerRow,
+        'uvRowStride': uPlane.bytesPerRow,
+        'uvPixelStride': uPlane.bytesPerPixel ?? 1,
+        'maxSide': AppConfig.jpegMaxSide,
+        'jpegQuality': AppConfig.jpegQuality,
+        'rotation': rotation,
+      });
+
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      // Update preview image
+      if (mounted) {
+        setState(() {
+          _lastSentImageBytes = jpegBytes;
+        });
+      } else {
+        _lastSentImageBytes = jpegBytes;
+      }
+
+      // Call VLM
+      final response = await _vlmService.describeJpegBytes(
+        jpegBytes,
+        prompt: AppConfig.prompt,
+        maxNewTokens: AppConfig.maxNewTokens,
+      ).timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          throw TimeoutException('VLM request timed out');
+        },
+      );
+
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      // Reset error counter on success
+      consecutiveErrors = 0;
+
+      final say = response.say.trim();
+      if (say.isEmpty) {
+        _displayText.value = AppConfig.fallbackText;
+      } else {
+        // Skip duplicates
+        if (lastSay == null || say != lastSay) {
+          lastSay = say;
+          _displayText.value = say;
+
+          if (_isTtsEnabled) {
+            final decision = _speakPolicy.decide(description: say);
+            if (decision.shouldSpeak) {
+              _ttsService.speak(decision.text);
+            }
+          }
+        }
+      }
+
+      // Wait before allowing next frame processing
+      await Future.delayed(AppConfig.inferenceInterval);
+
+    } catch (e) {
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      consecutiveErrors++;
+      debugPrint('[Inference] Error: $e (consecutive: $consecutiveErrors)');
+
+      // Back off exponentially if multiple errors
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        _displayText.value = 'Connection issue. Retrying...';
+        await Future.delayed(const Duration(seconds: 5));
+        consecutiveErrors = 0;
+      } else {
+        _displayText.value = AppConfig.fallbackText;
+        await Future.delayed(Duration(seconds: consecutiveErrors));
+      }
+    } finally {
+      _isProcessingFrame = false;
+      
+      // If we should still be processing and there's a newer frame, process it
+      if (_shouldProcessImage && _isModelReady && !_isDisposed) {
+        // Small delay to prevent tight loop
+        await Future.delayed(const Duration(milliseconds: 100));
+        if (_shouldProcessImage && !_isProcessingFrame) {
+          _processLatestFrame();
+        }
       }
     }
   }
@@ -238,144 +340,24 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _switchCamera() async {
     if (_isDisposed || widget.cameras.length < 2) return;
 
-    if (mounted && !_isDisposed) setState(() => _isInitialized = false);
     _displayText.value = 'Switching camera...';
+
+    // pause processing while switching
+    final wasProcessing = _shouldProcessImage;
+    _shouldProcessImage = false;
+    await _ttsService.stop();
+
+    // Wait for any ongoing processing to finish
+    while (_isProcessingFrame && !_isDisposed) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
 
     final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
     await _ensureCameraInitialized(newIndex);
-  }
 
-  Future<void> _runLatestOnlyLoop(Completer<void> localCancel) async {
-    if (_inferenceLoopRunning) return;
-    _inferenceLoopRunning = true;
-
-    int lastProcessedGen = -1;
-
-    try {
-      while (!_isDisposed && !localCancel.isCompleted && _shouldProcessImage) {
-        if (_latestImage == null || _latestGen == lastProcessedGen) {
-          await Future.delayed(const Duration(milliseconds: 30));
-          continue;
-        }
-
-        final now = DateTime.now();
-        if (_lastInferenceTime != null &&
-            now.difference(_lastInferenceTime!) < AppConfig.inferenceInterval) {
-          await Future.delayed(const Duration(milliseconds: 20));
-          continue;
-        }
-        _lastInferenceTime = now;
-
-        final image = _latestImage!;
-        lastProcessedGen = _latestGen;
-
-        try {
-          final Uint8List jpegBytes =
-              await compute(yuvToJpegIsolate, <String, dynamic>{
-                'image': image,
-                'maxSide': AppConfig.jpegMaxSide,
-                'jpegQuality': AppConfig.jpegQuality,
-              });
-
-          if (_isDisposed || localCancel.isCompleted || !_shouldProcessImage)
-            break;
-
-          final result = await _vlmService.describeJpegBytes(
-            jpegBytes,
-            prompt: AppConfig.prompt,
-            maxNewTokens: AppConfig.maxNewTokens,
-          );
-
-          if (_isDisposed || localCancel.isCompleted || !_shouldProcessImage)
-            break;
-
-          final cleaned = result.trim();
-          _displayText.value = cleaned.isNotEmpty
-              ? cleaned
-              : AppConfig.fallbackText;
-
-          if (cleaned == _lastResult) {
-            await Future.delayed(const Duration(milliseconds: 400));
-            continue; // ข้าม ไม่อัปเดต UI ไม่ยิงซ้ำ
-          }
-
-          _lastResult = cleaned;
-          _displayText.value = cleaned;
-        } catch (_) {
-          if (_isDisposed || localCancel.isCompleted || !_shouldProcessImage)
-            break;
-          _displayText.value = AppConfig.fallbackText;
-        }
-      }
-    } finally {
-      _inferenceLoopRunning = false;
-    }
-  }
-
-  Future<void> _handleCameraImage(
-    CameraImage image,
-    Completer<void> localCancel,
-  ) async {
-    if (_isDisposed) return;
-    if (localCancel.isCompleted) return;
-
-    // Shed load (CPU/network). Adjust 2~4 as needed.
-    if ((++_frameCount % 3) != 0) return;
-
-    final controller = _controller;
-    if (!mounted ||
-        controller == null ||
-        !controller.value.isInitialized ||
-        _isProcessingFrame ||
-        !_shouldProcessImage ||
-        !_isModelReady ||
-        _isModelLoading) {
-      return;
-    }
-
-    // Throttle requests
-    final now = DateTime.now();
-    if (_lastInferenceTime != null &&
-        now.difference(_lastInferenceTime!) < AppConfig.inferenceInterval) {
-      return;
-    }
-    _lastInferenceTime = now;
-
-    _isProcessingFrame = true;
-
-    try {
-      final Uint8List jpegBytes =
-          await compute(yuvToJpegIsolate, <String, dynamic>{
-            'image': image,
-            'maxSide': AppConfig.jpegMaxSide,
-            'jpegQuality': AppConfig.jpegQuality,
-          });
-
-      if (_isDisposed || localCancel.isCompleted) return;
-
-      final result = await _vlmService.describeJpegBytes(
-        jpegBytes,
-        prompt: AppConfig.prompt,
-        maxNewTokens: AppConfig.maxNewTokens,
-      );
-
-      if (_isDisposed || localCancel.isCompleted) return;
-
-      final cleaned = result.trim();
-      if (cleaned.isNotEmpty) {
-        if (cleaned != _lastResult) _lastResult = cleaned;
-        _displayText.value = cleaned;
-      } else {
-        _displayText.value = AppConfig.fallbackText;
-      }
-    } catch (e) {
-      debugPrint('Inference error: $e');
-      if (!_isDisposed && !localCancel.isCompleted) {
-        _displayText.value = AppConfig.fallbackText;
-      }
-    } finally {
-      _isProcessingFrame = false;
-    }
+    // restore
+    _shouldProcessImage = wasProcessing;
+    _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
   }
 
   Future<void> _toggleFlash() async {
@@ -383,35 +365,51 @@ class _CameraScreenState extends State<CameraScreen>
     if (controller == null || !controller.value.isInitialized) return;
 
     try {
-      final newMode = _desiredFlashMode == FlashMode.off
-          ? FlashMode.torch
-          : FlashMode.off;
+      final newMode =
+          _desiredFlashMode == FlashMode.off ? FlashMode.torch : FlashMode.off;
       await controller.setFlashMode(newMode);
-
       if (mounted && !_isDisposed) {
         setState(() => _desiredFlashMode = newMode);
       } else {
         _desiredFlashMode = newMode;
       }
     } catch (e) {
-      debugPrint('Flash toggle error: $e');
-      _showTemporaryMessage('Failed to toggle flash');
+      debugPrint('[CameraScreen] Flash toggle error: $e');
     }
   }
 
   void _toggleProcessing() {
     if (_isDisposed) return;
 
-    setState(() => _shouldProcessImage = !_shouldProcessImage);
+    if (mounted && !_isDisposed) {
+      setState(() => _shouldProcessImage = !_shouldProcessImage);
+    } else {
+      _shouldProcessImage = !_shouldProcessImage;
+    }
 
     if (_shouldProcessImage) {
       _displayText.value = 'Analyzing...';
-      final cancel = _processingCancellation;
-      if (cancel != null && !cancel.isCompleted && !_inferenceLoopRunning) {
-        _runLatestOnlyLoop(cancel);
+      // Trigger processing if not already running
+      if (!_isProcessingFrame) {
+        _processLatestFrame();
       }
     } else {
       _displayText.value = 'Stopped';
+      _ttsService.stop();
+    }
+  }
+
+  void _toggleTts() {
+    if (_isDisposed) return;
+
+    if (mounted && !_isDisposed) {
+      setState(() => _isTtsEnabled = !_isTtsEnabled);
+    } else {
+      _isTtsEnabled = !_isTtsEnabled;
+    }
+
+    if (!_isTtsEnabled) {
+      _ttsService.stop();
     }
   }
 
@@ -423,12 +421,12 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _disposeCamera() async {
-    // cancel any in-flight processing immediately
-    final cancel = _processingCancellation;
-    if (cancel != null && !cancel.isCompleted) cancel.complete();
+    await _ttsService.stop();
 
-    _shouldProcessImage = false;
-    _isProcessingFrame = false;
+    // Wait for processing to finish
+    while (_isProcessingFrame && !_isDisposed) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
 
     final old = _controller;
     if (old == null) {
@@ -437,98 +435,82 @@ class _CameraScreenState extends State<CameraScreen>
       } else {
         _isInitialized = false;
       }
+      _latestFrame = null;
       return;
     }
 
-    // 1) DETACH preview from widget tree first
+    // DETACH first to avoid CameraPreview using disposed controller
     if (mounted && !_isDisposed) {
       setState(() {
         _controller = null;
         _isInitialized = false;
       });
-
-      // 2) wait for the frame that removes CameraPreview to complete
       try {
         await WidgetsBinding.instance.endOfFrame;
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('[CameraScreen] endOfFrame error: $e');
+      }
     } else {
       _controller = null;
       _isInitialized = false;
     }
 
-    // 3) now it is safe to stop stream + dispose
+    // stop stream then dispose
     try {
       if (old.value.isStreamingImages) {
         await old.stopImageStream();
       }
     } catch (e) {
-      debugPrint('Error stopping stream: $e');
+      debugPrint('[CameraScreen] stopImageStream error: $e');
     }
-
     try {
       await old.dispose();
     } catch (e) {
-      debugPrint('Error disposing controller: $e');
+      debugPrint('[CameraScreen] dispose error: $e');
     }
+
+    _latestFrame = null;
   }
 
   void _setError(String message) {
     if (_isDisposed) return;
-    if (mounted) setState(() => _errorMessage = message);
+    if (mounted) {
+      setState(() => _errorMessage = message);
+    } else {
+      _errorMessage = message;
+    }
     _displayText.value = message;
-  }
-
-  void _showTemporaryMessage(String message) {
-    _displayText.value = message;
-    _tmpMsgTimer?.cancel();
-    _tmpMsgTimer = Timer(_tmpMsgDuration, () {
-      if (!_isDisposed) {
-        _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Paused';
-      }
-    });
   }
 
   @override
   void dispose() {
     _isDisposed = true;
 
-    // Cancel any in-flight processing
-    final cancel = _processingCancellation;
-    if (cancel != null && !cancel.isCompleted) cancel.complete();
-
     WidgetsBinding.instance.removeObserver(this);
-    _tmpMsgTimer?.cancel();
+
+    _ttsService.dispose();
 
     final old = _controller;
-    _controller = null; // Hard detach
+    _controller = null;
     _isInitialized = false;
 
-    // Properly dispose controller without setState using unawaited
     if (old != null) {
-      unawaited(
-        Future.microtask(() async {
-          try {
-            if (old.value.isStreamingImages) {
-              await old.stopImageStream();
-            }
-          } catch (e) {
-            debugPrint('Error stopping stream in dispose: $e');
+      // Fire and forget cleanup
+      Future.microtask(() async {
+        try {
+          if (old.value.isStreamingImages) {
+            await old.stopImageStream();
           }
-          try {
-            await old.dispose();
-          } catch (e) {
-            debugPrint('Error disposing controller: $e');
-          }
-        }),
-      );
+        } catch (e) {
+          debugPrint('[CameraScreen] Cleanup stopImageStream error: $e');
+        }
+        try {
+          await old.dispose();
+        } catch (e) {
+          debugPrint('[CameraScreen] Cleanup dispose error: $e');
+        }
+      });
     }
-
-    // CRITICAL: Dispose VLM service to prevent HTTP client leak
-    // try {
-    //   _vlmService.dispose();
-    // } catch (e) {
-    //   debugPrint('Error disposing VLM service: $e');
-    // }
 
     _displayText.dispose();
     super.dispose();
@@ -554,6 +536,7 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildCameraView() {
     final controller = _controller;
     if (controller == null) return _buildLoadingView();
+    if (!controller.value.isInitialized) return _buildLoadingView();
 
     final previewSize = controller.value.previewSize;
     if (previewSize == null) return _buildLoadingView();
@@ -570,6 +553,25 @@ class _CameraScreenState extends State<CameraScreen>
             ),
           ),
         ),
+        if (_lastSentImageBytes != null)
+          Positioned(
+            right: 12,
+            top: 80,
+            child: Container(
+              width: 200,
+              height: 180,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white54, width: 2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Image.memory(
+                _lastSentImageBytes!,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+              ),
+            ),
+          ),
         _buildTopControls(),
         _buildCameraSight(),
         _buildDisplayTextBox(),
@@ -586,7 +588,10 @@ class _CameraScreenState extends State<CameraScreen>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _buildCircleButton(icon: Icons.settings, onTap: _openSettings),
+          _buildCircleButton(
+            icon: Icons.settings,
+            onTap: _openSettings,
+          ),
           _buildCircleButton(
             icon: _desiredFlashMode == FlashMode.torch
                 ? Icons.flash_on
@@ -619,12 +624,18 @@ class _CameraScreenState extends State<CameraScreen>
       child: ValueListenableBuilder<String>(
         valueListenable: _displayText,
         builder: (context, text, child) {
+          Color borderColor = Colors.white24;
+          final lower = text.toLowerCase();
+          if (lower.contains('unclear') || lower.contains('difficult')) {
+            borderColor = Colors.orange;
+          }
+
           return Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: Colors.black.withOpacity(0.7),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white24, width: 1),
+              border: Border.all(color: borderColor, width: 2),
             ),
             child: Text(
               text,
@@ -660,7 +671,11 @@ class _CameraScreenState extends State<CameraScreen>
             else
               const SizedBox(width: 44),
             _buildStartStopButton(),
-            const SizedBox(width: 44),
+            _buildCircleButton(
+              icon: _isTtsEnabled ? Icons.volume_up : Icons.volume_off,
+              onTap: _toggleTts,
+              color: _isTtsEnabled ? Colors.white : Colors.white54,
+            ),
           ],
         ),
       ),
@@ -716,8 +731,9 @@ class _CameraScreenState extends State<CameraScreen>
           const SizedBox(height: 16),
           ValueListenableBuilder<String>(
             valueListenable: _displayText,
-            builder: (context, text, child) =>
-                Text(text, style: const TextStyle(color: Colors.white)),
+            builder: (context, text, child) {
+              return Text(text, style: const TextStyle(color: Colors.white));
+            },
           ),
         ],
       ),
@@ -839,47 +855,23 @@ class _CameraSightPainter extends CustomPainter {
     const cornerLength = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    canvas.drawLine(
-      rect.topLeft,
-      rect.topLeft + const Offset(cornerLength, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.topLeft,
-      rect.topLeft + const Offset(0, cornerLength),
-      paint,
-    );
-    canvas.drawLine(
-      rect.topRight,
-      rect.topRight - const Offset(cornerLength, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.topRight,
-      rect.topRight + const Offset(0, cornerLength),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft + const Offset(cornerLength, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft - const Offset(0, cornerLength),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight - const Offset(cornerLength, 0),
-      paint,
-    );
-    canvas.drawLine(
-      rect.bottomRight,
-      rect.bottomRight - const Offset(0, cornerLength),
-      paint,
-    );
+    // Top-left
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(cornerLength, 0), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, cornerLength), paint);
 
+    // Top-right
+    canvas.drawLine(rect.topRight, rect.topRight - const Offset(cornerLength, 0), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, cornerLength), paint);
+
+    // Bottom-left
+    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + const Offset(cornerLength, 0), paint);
+    canvas.drawLine(rect.bottomLeft, rect.bottomLeft - const Offset(0, cornerLength), paint);
+
+    // Bottom-right
+    canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(cornerLength, 0), paint);
+    canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(0, cornerLength), paint);
+
+    // Center dot
     canvas.drawCircle(rect.center, 2, Paint()..color = Colors.white);
   }
 
