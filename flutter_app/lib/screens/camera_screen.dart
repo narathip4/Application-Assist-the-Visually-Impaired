@@ -44,19 +44,20 @@ class _CameraScreenState extends State<CameraScreen>
 
   // Processing control
   bool _shouldProcessImage = true;
-  bool _isProcessingFrame = false; // NEW: Track if currently processing
+  bool _inferenceLoopRunning = false;
 
   // UI
   final ValueNotifier<String> _displayText =
       ValueNotifier<String>('Initializing...');
   String? _errorMessage;
 
-  // Latest frame (latest-only) - NOW ONLY STORES REFERENCE
-  CameraImage? _latestFrame;
-  int _latestFrameTimestamp = 0;
+  // Latest frame (latest-only)
+  _YuvSnapshot? _latestSnap;
+  int _latestFrameGen = 1;
 
   // Lifecycle / cancellation
   bool _isDisposed = false;
+  Completer<void>? _cancellationToken;
   int _streamGen = 0;
 
   Uint8List? _lastSentImageBytes;
@@ -171,7 +172,7 @@ class _CameraScreenState extends State<CameraScreen>
 
       final newController = CameraController(
         widget.cameras[cameraIndex],
-        ResolutionPreset.medium, // CHANGED: medium instead of high for better performance
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -184,8 +185,16 @@ class _CameraScreenState extends State<CameraScreen>
 
       await newController.setFlashMode(_desiredFlashMode);
 
+      // New stream generation & cancellation token
       _streamGen++;
+      final oldToken = _cancellationToken;
+      if (oldToken != null && !oldToken.isCompleted) {
+        oldToken.complete();
+      }
+
       final myGen = _streamGen;
+      _cancellationToken = Completer<void>();
+      final token = _cancellationToken!;
 
       if (mounted && !_isDisposed) {
         setState(() {
@@ -201,21 +210,37 @@ class _CameraScreenState extends State<CameraScreen>
         _errorMessage = null;
       }
 
-      // Start image stream with optimized callback
-      await newController.startImageStream((CameraImage img) {
+      await newController.startImageStream((img) {
         if (_isDisposed || myGen != _streamGen) return;
+        if (token.isCompleted) return;
 
-        // CRITICAL FIX: Skip if already processing
-        if (_isProcessingFrame || !_shouldProcessImage || !_isModelReady) {
-          return;
+        // latest-only
+        final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
+
+        // Reduce overhead: snapshot only when processing
+        if (!_shouldProcessImage || !_isModelReady) return;
+
+        final yPlane = img.planes[0];
+        final uPlane = img.planes[1];
+        final vPlane = img.planes[2];
+
+        _latestSnap = _YuvSnapshot(
+          width: img.width,
+          height: img.height,
+          y: Uint8List.fromList(yPlane.bytes),
+          u: Uint8List.fromList(uPlane.bytes),
+          v: Uint8List.fromList(vPlane.bytes),
+          yRowStride: yPlane.bytesPerRow,
+          uvRowStride: uPlane.bytesPerRow,
+          uvPixelStride: uPlane.bytesPerPixel ?? 1,
+          rotation: rotation,
+        );
+
+        _latestFrameGen++;
+
+        if (_shouldProcessImage && !_inferenceLoopRunning && _isModelReady) {
+          _runInferenceLoop(token);
         }
-
-        // Store reference only (no copying yet)
-        _latestFrame = img;
-        _latestFrameTimestamp = DateTime.now().millisecondsSinceEpoch;
-
-        // Trigger processing
-        _processLatestFrame();
       });
 
       _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
@@ -225,75 +250,92 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _processLatestFrame() async {
-    if (_isProcessingFrame || _latestFrame == null) return;
-    if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
+  Future<void> _runInferenceLoop(Completer<void> token) async {
+    if (_inferenceLoopRunning) return;
+    _inferenceLoopRunning = true;
 
-    _isProcessingFrame = true;
-
+    int lastProcessedGen = -1;
     String? lastSay;
     int consecutiveErrors = 0;
     const maxConsecutiveErrors = 3;
 
     try {
-      final img = _latestFrame!;
-      final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
+      while (!_isDisposed &&
+          !token.isCompleted &&
+          _shouldProcessImage &&
+          _isModelReady) {
+        
+        // Wait for new frame
+        if (_latestSnap == null || _latestFrameGen == lastProcessedGen) {
+          await Future.delayed(const Duration(milliseconds: 100));
+          continue;
+        }
 
-      // Copy YUV data NOW (only when we're actually processing)
-      final yPlane = img.planes[0];
-      final uPlane = img.planes[1];
-      final vPlane = img.planes[2];
+        final genAtStart = _latestFrameGen;
+        final snap = _latestSnap!;
+        lastProcessedGen = genAtStart;
 
-      // Convert YUV -> JPEG off main thread
-      final jpegBytes = await compute(yuvToJpegIsolate, <String, dynamic>{
-        'width': img.width,
-        'height': img.height,
-        'y': Uint8List.fromList(yPlane.bytes),
-        'u': Uint8List.fromList(uPlane.bytes),
-        'v': Uint8List.fromList(vPlane.bytes),
-        'yRowStride': yPlane.bytesPerRow,
-        'uvRowStride': uPlane.bytesPerRow,
-        'uvPixelStride': uPlane.bytesPerPixel ?? 1,
-        'maxSide': AppConfig.jpegMaxSide,
-        'jpegQuality': AppConfig.jpegQuality,
-        'rotation': rotation,
-      });
+        try {
+          // Convert YUV -> JPEG off main thread
+          final jpegBytes = await compute(yuvToJpegIsolate, <String, dynamic>{
+            'width': snap.width,
+            'height': snap.height,
+            'y': snap.y,
+            'u': snap.u,
+            'v': snap.v,
+            'yRowStride': snap.yRowStride,
+            'uvRowStride': snap.uvRowStride,
+            'uvPixelStride': snap.uvPixelStride,
+            'maxSide': AppConfig.jpegMaxSide,
+            'jpegQuality': AppConfig.jpegQuality,
+            'rotation': snap.rotation,
+          });
 
-      if (_isDisposed || !_shouldProcessImage) return;
+          if (mounted) {
+            setState(() {
+              _lastSentImageBytes = jpegBytes;
+            });
+          } else {
+            _lastSentImageBytes = jpegBytes;
+          }
 
-      // Update preview image
-      if (mounted) {
-        setState(() {
-          _lastSentImageBytes = jpegBytes;
-        });
-      } else {
-        _lastSentImageBytes = jpegBytes;
-      }
+          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
+          
+          // Skip if frame is already stale
+          if (_latestFrameGen != genAtStart) {
+            continue;
+          }
 
-      // Call VLM
-      final response = await _vlmService.describeJpegBytes(
-        jpegBytes,
-        prompt: AppConfig.prompt,
-        maxNewTokens: AppConfig.maxNewTokens,
-      ).timeout(
-        const Duration(seconds: 15),
-        onTimeout: () {
-          throw TimeoutException('VLM request timed out');
-        },
-      );
+          final response = await _vlmService.describeJpegBytes(
+            jpegBytes,
+            prompt: AppConfig.prompt,
+            maxNewTokens: AppConfig.maxNewTokens,
+          ).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () {
+              throw TimeoutException('VLM request timed out');
+            },
+          );
 
-      if (_isDisposed || !_shouldProcessImage) return;
+          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
 
-      // Reset error counter on success
-      consecutiveErrors = 0;
+          // Reset error counter on success
+          consecutiveErrors = 0;
 
-      final say = response.say.trim();
-      if (say.isEmpty) {
-        _displayText.value = AppConfig.fallbackText;
-      } else {
-        // Skip duplicates
-        if (lastSay == null || say != lastSay) {
+          final say = response.say.trim();
+          if (say.isEmpty) {
+            _displayText.value = AppConfig.fallbackText;
+            await Future.delayed(AppConfig.inferenceInterval);
+            continue;
+          }
+
+          // Skip duplicates
+          if (lastSay != null && say == lastSay) {
+            await Future.delayed(AppConfig.inferenceInterval);
+            continue;
+          }
           lastSay = say;
+
           _displayText.value = say;
 
           if (_isTtsEnabled) {
@@ -302,38 +344,29 @@ class _CameraScreenState extends State<CameraScreen>
               _ttsService.speak(decision.text);
             }
           }
+
+          // Wait before next inference
+          await Future.delayed(AppConfig.inferenceInterval);
+          
+        } catch (e) {
+          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
+          
+          consecutiveErrors++;
+          debugPrint('[Inference] Error: $e (consecutive: $consecutiveErrors)');
+          
+          // Back off exponentially if multiple errors
+          if (consecutiveErrors >= maxConsecutiveErrors) {
+            _displayText.value = 'Connection issue. Retrying...';
+            await Future.delayed(const Duration(seconds: 5));
+            consecutiveErrors = 0;
+          } else {
+            _displayText.value = AppConfig.fallbackText;
+            await Future.delayed(Duration(seconds: consecutiveErrors));
+          }
         }
-      }
-
-      // Wait before allowing next frame processing
-      await Future.delayed(AppConfig.inferenceInterval);
-
-    } catch (e) {
-      if (_isDisposed || !_shouldProcessImage) return;
-
-      consecutiveErrors++;
-      debugPrint('[Inference] Error: $e (consecutive: $consecutiveErrors)');
-
-      // Back off exponentially if multiple errors
-      if (consecutiveErrors >= maxConsecutiveErrors) {
-        _displayText.value = 'Connection issue. Retrying...';
-        await Future.delayed(const Duration(seconds: 5));
-        consecutiveErrors = 0;
-      } else {
-        _displayText.value = AppConfig.fallbackText;
-        await Future.delayed(Duration(seconds: consecutiveErrors));
       }
     } finally {
-      _isProcessingFrame = false;
-      
-      // If we should still be processing and there's a newer frame, process it
-      if (_shouldProcessImage && _isModelReady && !_isDisposed) {
-        // Small delay to prevent tight loop
-        await Future.delayed(const Duration(milliseconds: 100));
-        if (_shouldProcessImage && !_isProcessingFrame) {
-          _processLatestFrame();
-        }
-      }
+      _inferenceLoopRunning = false;
     }
   }
 
@@ -347,17 +380,21 @@ class _CameraScreenState extends State<CameraScreen>
     _shouldProcessImage = false;
     await _ttsService.stop();
 
-    // Wait for any ongoing processing to finish
-    while (_isProcessingFrame && !_isDisposed) {
-      await Future.delayed(const Duration(milliseconds: 50));
-    }
-
     final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
     await _ensureCameraInitialized(newIndex);
 
     // restore
     _shouldProcessImage = wasProcessing;
     _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+
+    final token = _cancellationToken;
+    if (_shouldProcessImage &&
+        token != null &&
+        !token.isCompleted &&
+        !_inferenceLoopRunning &&
+        _isModelReady) {
+      _runInferenceLoop(token);
+    }
   }
 
   Future<void> _toggleFlash() async {
@@ -389,13 +426,14 @@ class _CameraScreenState extends State<CameraScreen>
 
     if (_shouldProcessImage) {
       _displayText.value = 'Analyzing...';
-      // Trigger processing if not already running
-      if (!_isProcessingFrame) {
-        _processLatestFrame();
+      final token = _cancellationToken;
+      if (token != null && !token.isCompleted && !_inferenceLoopRunning) {
+        _runInferenceLoop(token);
       }
     } else {
       _displayText.value = 'Stopped';
       _ttsService.stop();
+      _latestFrameGen++;
     }
   }
 
@@ -421,12 +459,13 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _disposeCamera() async {
-    await _ttsService.stop();
-
-    // Wait for processing to finish
-    while (_isProcessingFrame && !_isDisposed) {
-      await Future.delayed(const Duration(milliseconds: 50));
+    // stop inference loop
+    final token = _cancellationToken;
+    if (token != null && !token.isCompleted) {
+      token.complete();
     }
+
+    await _ttsService.stop();
 
     final old = _controller;
     if (old == null) {
@@ -435,7 +474,8 @@ class _CameraScreenState extends State<CameraScreen>
       } else {
         _isInitialized = false;
       }
-      _latestFrame = null;
+      _latestSnap = null;
+      _latestFrameGen++;
       return;
     }
 
@@ -469,7 +509,8 @@ class _CameraScreenState extends State<CameraScreen>
       debugPrint('[CameraScreen] dispose error: $e');
     }
 
-    _latestFrame = null;
+    _latestSnap = null;
+    _latestFrameGen++;
   }
 
   void _setError(String message) {
@@ -485,6 +526,9 @@ class _CameraScreenState extends State<CameraScreen>
   @override
   void dispose() {
     _isDisposed = true;
+
+    final token = _cancellationToken;
+    if (token != null && !token.isCompleted) token.complete();
 
     WidgetsBinding.instance.removeObserver(this);
 
@@ -877,4 +921,28 @@ class _CameraSightPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _YuvSnapshot {
+  final int width;
+  final int height;
+  final Uint8List y;
+  final Uint8List u;
+  final Uint8List v;
+  final int yRowStride;
+  final int uvRowStride;
+  final int uvPixelStride;
+  final int rotation;
+
+  _YuvSnapshot({
+    required this.width,
+    required this.height,
+    required this.y,
+    required this.u,
+    required this.v,
+    required this.yRowStride,
+    required this.uvRowStride,
+    required this.uvPixelStride,
+    required this.rotation,
+  });
 }
