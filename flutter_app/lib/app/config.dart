@@ -1,71 +1,54 @@
 // lib/app/config.dart
 class AppConfig {
-  static const String appName = 'Assist – Vision Aid';
+  static const String appName = 'Assist the Visually Impaired';
   
   // Hugging Face Space base URL
   static const String vlmBaseUrl =
       'https://narathip7-fastvlm-space-test.hf.space';
   
   // VLM parameters
-  static const int maxNewTokens = 24;
-  static const int jpegMaxSide = 356;
+  // maxNewTokens: Limits response length to keep descriptions concise
+  // Lower values = faster responses, but may cut off important details
+  static const int maxNewTokens = 32;
+  
+  // Image optimization settings
+  // jpegMaxSide: Reduces image size for faster processing while maintaining recognition quality
+  // jpegQuality: Balances file size against image clarity (60 is a good compromise)
+  static const int jpegMaxSide = 360;
   static const int jpegQuality = 60;
   
-  // Optimized prompt for vision assistance
-  static const String prompt = '''You are helping a visually impaired person understand their surroundings.
+  // Prompt for VLM to generate descriptions
+  static const String prompt = '''You are describing a scene to help a visually impaired person navigate indoor spaces and pedestrian walkways.
 
-Describe what you see in one clear sentence, focusing on the most important elements.
+Provide a brief, clear description in one to two sentences. Focus on stationary elements and potential obstacles you can identify with certainty.
 
-Rules:
-- Be brief and direct (1-2 sentences maximum)
-- Mention key objects, people, or actions
-- Use simple language
-- State only what you actually see
-- If unclear, say: "The image is unclear and difficult to understand."
+What to describe:
+- Objects and obstacles in the field of view, especially at chest or head height where a cane might not detect them, such as poles, signs, overhanging branches, or furniture
+- Architectural features like doors, walls, stairs, ramps, or level changes
+- Floor surfaces and any visible hazards like wet floor signs, uneven surfaces, or objects on the ground
+- Tactile paving, accessible pathway markings, or other accessibility features
+- People or objects that appear to be in or near the walking path
 
-Describe now:''';
+How to describe:
+- Use clear spatial terms such as "directly ahead," "to your left," "on the right side," or "at the center of view"
+- Describe what you see without claiming to know exact distances in meters or feet
+- For potential obstacles, describe what they are and their approximate position, such as "a pole appears in the center of your path" or "stairs descending ahead"
+- Use simple, direct language that focuses on what is observable in the image
 
-//  static const String prompt = '''
-// You assist a visually impaired user by describing their environment.
+Safety boundaries:
+- Do NOT make claims about whether something is safe to approach or how far away it is in specific measurements
+- Do NOT analyze traffic situations, moving vehicles, or road crossings because this system is not designed for those environments
+- If the lighting is poor or the image is unclear, state honestly: "The image quality is insufficient for reliable description"
+- If you detect what appears to be a road or traffic area, state: "This appears to be a traffic area where this system should not be used"
 
-// CRITICAL RULES:
-// - Never estimate distances or give exact directions.
-// - Neutral description only (no commands).
-// - Never invent details. If unsure: certainty=low and summary starts with "Unclear:".
+Describe what you see now:''';
 
-// You will be given MODE on the last line as: MODE=scene|hazard|read
-// Always follow MODE.
-
-// OUTPUT (exactly one line):
-// mode|risk|certainty|hazards|summary
-
-// risk: none|low|medium|high (based on visible hazards only; not distance)
-// certainty: low|medium|high
-
-// hazards must be ONLY from:
-// stairs,step,curb,dropoff,hole,ramp,vehicle,bicycle,motorcycle,
-// person,crowd,animal,door,glass,obstacle,clutter,narrow,barrier,
-// wet,uneven,slope,dark,construction,unknown,none
-
-// - up to 3 items, comma-separated
-// - if no hazards: none
-// - if hazards unclear but something may be risky: unknown
-
-// MODE behavior:
-// - scene: brief environment + hazards (≤120 chars)
-// - hazard: hazards only + immediate context (≤120 chars)
-// - read: visible text verbatim (≤200 chars); if none: "No readable text"
-// hazards field:
-
-// If risk=high AND certainty=high, summary must start with "ALERT:".
-// One line only. No extra text.
-// ''';
-
-
-
-  static const String fallbackText = 'Scanning...';
+  // User-facing message shown while processing
+  // Changed to better reflect the uncertainty inherent in the process
+  static const String fallbackText = 'Processing image...';
   
   // Timing configuration
+  // inferenceInterval: How often the app captures and processes new images
+  // 1200ms (1.2 seconds) balances responsiveness with processing load
   static const Duration inferenceInterval = Duration(milliseconds: 1200);
-
 }

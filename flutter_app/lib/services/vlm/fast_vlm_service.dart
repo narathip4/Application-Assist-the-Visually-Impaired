@@ -84,6 +84,7 @@ class FastVlmService {
   String _extractText(dynamic decoded) {
     if (decoded is Map<String, dynamic>) {
       String raw =
+          (decoded['say'] as String?) ??
           (decoded['text'] as String?) ??
           (decoded['result'] as String?) ??
           (decoded['caption'] as String?) ??
@@ -120,7 +121,7 @@ class FastVlmService {
     }
 
     // Keep short for TTS
-    if (text.length > 200) text = text.substring(0, 200);
+    if (text.length > 300) text = text.substring(0, 300);
 
     return text;
   }

@@ -1,58 +1,29 @@
 class SpeakDecision {
   final bool shouldSpeak;
-  final bool interrupt;
   final String text;
 
-  const SpeakDecision({
-    required this.shouldSpeak,
-    required this.interrupt,
-    required this.text,
-  });
-
-  static const none =
-      SpeakDecision(shouldSpeak: false, interrupt: false, text: '');
+  SpeakDecision(this.shouldSpeak, this.text);
 }
 
 class SpeakPolicy {
-  String? _lastSpoken;
+  final Duration cooldown;
   DateTime _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  final Duration cooldown;
+  SpeakPolicy({required this.cooldown});
 
-  SpeakPolicy({this.cooldown = const Duration(seconds: 2)});
-
-  /// Decide whether to speak a plain image description
-  SpeakDecision decide({
-    required String description,
-  }) {
-    final text = description.trim();
-    if (text.isEmpty) return SpeakDecision.none;
-
+  SpeakDecision decide({required String description}) {
     final now = DateTime.now();
 
-    // 1) ไม่พูดซ้ำข้อความเดิม
-    if (_lastSpoken != null && text == _lastSpoken) {
-      return SpeakDecision.none;
-    }
+    // Basic cleanup
+    final text = description.trim();
+    if (text.isEmpty) return SpeakDecision(false, text);
 
-    // 2) เคารพ cooldown (กันพูดรัว)
+    // Cooldown gate (for non-critical)
     if (now.difference(_lastSpokenAt) < cooldown) {
-      return SpeakDecision.none;
+      return SpeakDecision(false, text);
     }
 
-    // 3) ผ่านเงื่อนไข -> พูด
-    _lastSpoken = text;
     _lastSpokenAt = now;
-
-    return SpeakDecision(
-      shouldSpeak: true,
-      interrupt: false, // ไม่มี urgent mode ตอนนี้
-      text: text,
-    );
-  }
-
-  void reset() {
-    _lastSpoken = null;
-    _lastSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+    return SpeakDecision(true, text);
   }
 }

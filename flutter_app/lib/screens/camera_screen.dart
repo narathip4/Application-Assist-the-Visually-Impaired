@@ -1,18 +1,19 @@
 // lib/screens/camera_screen.dart
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:app/app/config.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../isolates/yuv_to_jpeg_isolate.dart';
 import '../screens/setting_screen.dart';
-import '../services/vlm/fast_vlm_service.dart';
-import '../services/tts/tts_service.dart';
 import '../services/tts/speak_policy.dart';
-import 'dart:typed_data';
+import '../services/tts/tts_service.dart';
+import '../services/vlm/fast_vlm_service.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -24,45 +25,56 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen>
-    with WidgetsBindingObserver {
-  // Camera
+class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
+  // -------------------- Pref keys (must match Settings screens) --------------------
+  static const String _kSpeechKey = 'ui.speech';
+  static const String _kSubtitleKey = 'ui.subtitle';
+
+  // -------------------- Camera --------------------
   CameraController? _controller;
   int _currentCameraIndex = 0;
   bool _isInitialized = false;
   bool _isPermissionGranted = false;
   FlashMode _desiredFlashMode = FlashMode.off;
 
-  // VLM
+  // -------------------- VLM --------------------
   late final FastVlmService _vlmService;
   bool _isModelReady = false;
 
-  // TTS
+  // -------------------- TTS --------------------
   late final TtsService _ttsService;
   late final SpeakPolicy _speakPolicy;
+
   bool _isTtsEnabled = true;
+  bool _subtitleEnabled = true;
 
-  // Processing control
+  // -------------------- Processing --------------------
   bool _shouldProcessImage = true;
-  bool _inferenceLoopRunning = false;
+  bool _isProcessingFrame = false;
 
-  // UI
-  final ValueNotifier<String> _displayText =
-      ValueNotifier<String>('Initializing...');
+  Timer? _processingTimer;
+
+  CameraImage? _latestFrame;
+  int _latestFrameTimestamp = 0;
+  int _lastProcessedTimestamp = 0;
+
+  String? _lastSpokenText;
+
+  int _consecutiveErrors = 0;
+  static const int _maxConsecutiveErrors = 3;
+
+  // -------------------- TTS Priority Control --------------------
+  bool _isSpeaking = false;
+  String? _pendingCritical;
+  int _lastCriticalStopAtMs = 0;
+
+  // -------------------- UI --------------------
+  final ValueNotifier<String> _displayText = ValueNotifier<String>('Initializing...');
   String? _errorMessage;
 
-  // Latest frame (latest-only)
-  _YuvSnapshot? _latestSnap;
-  int _latestFrameGen = 1;
-
-  // Lifecycle / cancellation
+  // -------------------- Lifecycle --------------------
   bool _isDisposed = false;
-  Completer<void>? _cancellationToken;
   int _streamGen = 0;
-
-  Uint8List? _lastSentImageBytes;
-
-  // Serialize setup
   Future<void> _setupChain = Future.value();
 
   @override
@@ -83,15 +95,21 @@ class _CameraScreenState extends State<CameraScreen>
     _initializeApp();
   }
 
+  // -------------------- App Init --------------------
+
   Future<void> _initializeApp() async {
     try {
       await Future.wait([
+        _loadUserSettings(),
         _requestCameraPermission(),
         _warmUpModel(),
         _ttsService.init(),
       ]);
 
       if (_isDisposed) return;
+
+      // Apply any TTS settings (speech rate etc.) from prefs
+      await _ttsService.refreshSettings();
 
       if (_isPermissionGranted && widget.cameras.isNotEmpty) {
         await _ensureCameraInitialized(_currentCameraIndex);
@@ -102,18 +120,12 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) async {
+  Future<void> _loadUserSettings() async {
+    final prefs = await SharedPreferences.getInstance();
     if (_isDisposed) return;
 
-    if (state == AppLifecycleState.paused) {
-      await _ttsService.stop();
-      await _disposeCamera();
-    } else if (state == AppLifecycleState.resumed) {
-      if (_isPermissionGranted && widget.cameras.isNotEmpty) {
-        await _ensureCameraInitialized(_currentCameraIndex);
-      }
-    }
+    _isTtsEnabled = prefs.getBool(_kSpeechKey) ?? true;
+    _subtitleEnabled = prefs.getBool(_kSubtitleKey) ?? true;
   }
 
   Future<void> _requestCameraPermission() async {
@@ -121,9 +133,7 @@ class _CameraScreenState extends State<CameraScreen>
       final status = await Permission.camera.request();
       if (!mounted || _isDisposed) return;
 
-      setState(() {
-        _isPermissionGranted = status == PermissionStatus.granted;
-      });
+      setState(() => _isPermissionGranted = status == PermissionStatus.granted);
 
       if (!_isPermissionGranted) {
         _setError('Camera permission denied');
@@ -149,389 +159,31 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _ensureCameraInitialized(int cameraIndex) {
-    _setupChain = _setupChain.then((_) async {
-      if (_isDisposed) return;
-      if (_isInitialized &&
-          _currentCameraIndex == cameraIndex &&
-          _controller != null &&
-          _controller!.value.isInitialized) {
-        return;
-      }
-      await _setupCamera(cameraIndex);
-    });
-    return _setupChain;
-  }
+  // -------------------- Lifecycle --------------------
 
-  Future<void> _setupCamera(int cameraIndex) async {
-    if (_isDisposed || widget.cameras.isEmpty) return;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
+    if (_isDisposed) return;
 
-    try {
+    if (state == AppLifecycleState.paused) {
+      await _ttsService.stop();
+      _stopProcessingTimer();
       await _disposeCamera();
-      if (!mounted || _isDisposed) return;
-
-      final newController = CameraController(
-        widget.cameras[cameraIndex],
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-
-      await newController.initialize();
-      if (!mounted || _isDisposed) {
-        await newController.dispose();
-        return;
+    } else if (state == AppLifecycleState.resumed) {
+      await _loadUserSettings();
+      await _ttsService.refreshSettings();
+      if (_isPermissionGranted && widget.cameras.isNotEmpty) {
+        await _ensureCameraInitialized(_currentCameraIndex);
       }
-
-      await newController.setFlashMode(_desiredFlashMode);
-
-      // New stream generation & cancellation token
-      _streamGen++;
-      final oldToken = _cancellationToken;
-      if (oldToken != null && !oldToken.isCompleted) {
-        oldToken.complete();
-      }
-
-      final myGen = _streamGen;
-      _cancellationToken = Completer<void>();
-      final token = _cancellationToken!;
-
-      if (mounted && !_isDisposed) {
-        setState(() {
-          _controller = newController;
-          _currentCameraIndex = cameraIndex;
-          _isInitialized = true;
-          _errorMessage = null;
-        });
-      } else {
-        _controller = newController;
-        _currentCameraIndex = cameraIndex;
-        _isInitialized = true;
-        _errorMessage = null;
-      }
-
-      await newController.startImageStream((img) {
-        if (_isDisposed || myGen != _streamGen) return;
-        if (token.isCompleted) return;
-
-        // latest-only
-        final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
-
-        // Reduce overhead: snapshot only when processing
-        if (!_shouldProcessImage || !_isModelReady) return;
-
-        final yPlane = img.planes[0];
-        final uPlane = img.planes[1];
-        final vPlane = img.planes[2];
-
-        _latestSnap = _YuvSnapshot(
-          width: img.width,
-          height: img.height,
-          y: Uint8List.fromList(yPlane.bytes),
-          u: Uint8List.fromList(uPlane.bytes),
-          v: Uint8List.fromList(vPlane.bytes),
-          yRowStride: yPlane.bytesPerRow,
-          uvRowStride: uPlane.bytesPerRow,
-          uvPixelStride: uPlane.bytesPerPixel ?? 1,
-          rotation: rotation,
-        );
-
-        _latestFrameGen++;
-
-        if (_shouldProcessImage && !_inferenceLoopRunning && _isModelReady) {
-          _runInferenceLoop(token);
-        }
-      });
-
-      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
-    } catch (e) {
-      debugPrint('[CameraScreen] Camera setup error: $e');
-      _setError('Camera initialization failed');
     }
-  }
-
-  Future<void> _runInferenceLoop(Completer<void> token) async {
-    if (_inferenceLoopRunning) return;
-    _inferenceLoopRunning = true;
-
-    int lastProcessedGen = -1;
-    String? lastSay;
-    int consecutiveErrors = 0;
-    const maxConsecutiveErrors = 3;
-
-    try {
-      while (!_isDisposed &&
-          !token.isCompleted &&
-          _shouldProcessImage &&
-          _isModelReady) {
-        
-        // Wait for new frame
-        if (_latestSnap == null || _latestFrameGen == lastProcessedGen) {
-          await Future.delayed(const Duration(milliseconds: 100));
-          continue;
-        }
-
-        final genAtStart = _latestFrameGen;
-        final snap = _latestSnap!;
-        lastProcessedGen = genAtStart;
-
-        try {
-          // Convert YUV -> JPEG off main thread
-          final jpegBytes = await compute(yuvToJpegIsolate, <String, dynamic>{
-            'width': snap.width,
-            'height': snap.height,
-            'y': snap.y,
-            'u': snap.u,
-            'v': snap.v,
-            'yRowStride': snap.yRowStride,
-            'uvRowStride': snap.uvRowStride,
-            'uvPixelStride': snap.uvPixelStride,
-            'maxSide': AppConfig.jpegMaxSide,
-            'jpegQuality': AppConfig.jpegQuality,
-            'rotation': snap.rotation,
-          });
-
-          if (mounted) {
-            setState(() {
-              _lastSentImageBytes = jpegBytes;
-            });
-          } else {
-            _lastSentImageBytes = jpegBytes;
-          }
-
-          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
-          
-          // Skip if frame is already stale
-          if (_latestFrameGen != genAtStart) {
-            continue;
-          }
-
-          final response = await _vlmService.describeJpegBytes(
-            jpegBytes,
-            prompt: AppConfig.prompt,
-            maxNewTokens: AppConfig.maxNewTokens,
-          ).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () {
-              throw TimeoutException('VLM request timed out');
-            },
-          );
-
-          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
-
-          // Reset error counter on success
-          consecutiveErrors = 0;
-
-          final say = response.say.trim();
-          if (say.isEmpty) {
-            _displayText.value = AppConfig.fallbackText;
-            await Future.delayed(AppConfig.inferenceInterval);
-            continue;
-          }
-
-          // Skip duplicates
-          if (lastSay != null && say == lastSay) {
-            await Future.delayed(AppConfig.inferenceInterval);
-            continue;
-          }
-          lastSay = say;
-
-          _displayText.value = say;
-
-          if (_isTtsEnabled) {
-            final decision = _speakPolicy.decide(description: say);
-            if (decision.shouldSpeak) {
-              _ttsService.speak(decision.text);
-            }
-          }
-
-          // Wait before next inference
-          await Future.delayed(AppConfig.inferenceInterval);
-          
-        } catch (e) {
-          if (_isDisposed || token.isCompleted || !_shouldProcessImage) break;
-          
-          consecutiveErrors++;
-          debugPrint('[Inference] Error: $e (consecutive: $consecutiveErrors)');
-          
-          // Back off exponentially if multiple errors
-          if (consecutiveErrors >= maxConsecutiveErrors) {
-            _displayText.value = 'Connection issue. Retrying...';
-            await Future.delayed(const Duration(seconds: 5));
-            consecutiveErrors = 0;
-          } else {
-            _displayText.value = AppConfig.fallbackText;
-            await Future.delayed(Duration(seconds: consecutiveErrors));
-          }
-        }
-      }
-    } finally {
-      _inferenceLoopRunning = false;
-    }
-  }
-
-  Future<void> _switchCamera() async {
-    if (_isDisposed || widget.cameras.length < 2) return;
-
-    _displayText.value = 'Switching camera...';
-
-    // pause processing while switching
-    final wasProcessing = _shouldProcessImage;
-    _shouldProcessImage = false;
-    await _ttsService.stop();
-
-    final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
-    await _ensureCameraInitialized(newIndex);
-
-    // restore
-    _shouldProcessImage = wasProcessing;
-    _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
-
-    final token = _cancellationToken;
-    if (_shouldProcessImage &&
-        token != null &&
-        !token.isCompleted &&
-        !_inferenceLoopRunning &&
-        _isModelReady) {
-      _runInferenceLoop(token);
-    }
-  }
-
-  Future<void> _toggleFlash() async {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    try {
-      final newMode =
-          _desiredFlashMode == FlashMode.off ? FlashMode.torch : FlashMode.off;
-      await controller.setFlashMode(newMode);
-      if (mounted && !_isDisposed) {
-        setState(() => _desiredFlashMode = newMode);
-      } else {
-        _desiredFlashMode = newMode;
-      }
-    } catch (e) {
-      debugPrint('[CameraScreen] Flash toggle error: $e');
-    }
-  }
-
-  void _toggleProcessing() {
-    if (_isDisposed) return;
-
-    if (mounted && !_isDisposed) {
-      setState(() => _shouldProcessImage = !_shouldProcessImage);
-    } else {
-      _shouldProcessImage = !_shouldProcessImage;
-    }
-
-    if (_shouldProcessImage) {
-      _displayText.value = 'Analyzing...';
-      final token = _cancellationToken;
-      if (token != null && !token.isCompleted && !_inferenceLoopRunning) {
-        _runInferenceLoop(token);
-      }
-    } else {
-      _displayText.value = 'Stopped';
-      _ttsService.stop();
-      _latestFrameGen++;
-    }
-  }
-
-  void _toggleTts() {
-    if (_isDisposed) return;
-
-    if (mounted && !_isDisposed) {
-      setState(() => _isTtsEnabled = !_isTtsEnabled);
-    } else {
-      _isTtsEnabled = !_isTtsEnabled;
-    }
-
-    if (!_isTtsEnabled) {
-      _ttsService.stop();
-    }
-  }
-
-  void _openSettings() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const SettingsScreen()),
-    );
-  }
-
-  Future<void> _disposeCamera() async {
-    // stop inference loop
-    final token = _cancellationToken;
-    if (token != null && !token.isCompleted) {
-      token.complete();
-    }
-
-    await _ttsService.stop();
-
-    final old = _controller;
-    if (old == null) {
-      if (mounted && !_isDisposed) {
-        setState(() => _isInitialized = false);
-      } else {
-        _isInitialized = false;
-      }
-      _latestSnap = null;
-      _latestFrameGen++;
-      return;
-    }
-
-    // DETACH first to avoid CameraPreview using disposed controller
-    if (mounted && !_isDisposed) {
-      setState(() {
-        _controller = null;
-        _isInitialized = false;
-      });
-      try {
-        await WidgetsBinding.instance.endOfFrame;
-      } catch (e) {
-        debugPrint('[CameraScreen] endOfFrame error: $e');
-      }
-    } else {
-      _controller = null;
-      _isInitialized = false;
-    }
-
-    // stop stream then dispose
-    try {
-      if (old.value.isStreamingImages) {
-        await old.stopImageStream();
-      }
-    } catch (e) {
-      debugPrint('[CameraScreen] stopImageStream error: $e');
-    }
-    try {
-      await old.dispose();
-    } catch (e) {
-      debugPrint('[CameraScreen] dispose error: $e');
-    }
-
-    _latestSnap = null;
-    _latestFrameGen++;
-  }
-
-  void _setError(String message) {
-    if (_isDisposed) return;
-    if (mounted) {
-      setState(() => _errorMessage = message);
-    } else {
-      _errorMessage = message;
-    }
-    _displayText.value = message;
   }
 
   @override
   void dispose() {
     _isDisposed = true;
-
-    final token = _cancellationToken;
-    if (token != null && !token.isCompleted) token.complete();
-
     WidgetsBinding.instance.removeObserver(this);
 
+    _stopProcessingTimer();
     _ttsService.dispose();
 
     final old = _controller;
@@ -539,12 +191,9 @@ class _CameraScreenState extends State<CameraScreen>
     _isInitialized = false;
 
     if (old != null) {
-      // Fire and forget cleanup
       Future.microtask(() async {
         try {
-          if (old.value.isStreamingImages) {
-            await old.stopImageStream();
-          }
+          if (old.value.isStreamingImages) await old.stopImageStream();
         } catch (e) {
           debugPrint('[CameraScreen] Cleanup stopImageStream error: $e');
         }
@@ -560,7 +209,418 @@ class _CameraScreenState extends State<CameraScreen>
     super.dispose();
   }
 
-  // ================= UI =================
+  // -------------------- Camera Setup --------------------
+
+  Future<void> _ensureCameraInitialized(int cameraIndex) {
+    _setupChain = _setupChain.then((_) async {
+      if (_isDisposed) return;
+
+      final c = _controller;
+      final alreadyOk = _isInitialized &&
+          _currentCameraIndex == cameraIndex &&
+          c != null &&
+          c.value.isInitialized;
+
+      if (alreadyOk) return;
+
+      await _setupCamera(cameraIndex);
+    });
+
+    return _setupChain;
+  }
+
+  Future<void> _setupCamera(int cameraIndex) async {
+    if (_isDisposed || widget.cameras.isEmpty) return;
+
+    try {
+      await _disposeCamera();
+      if (!mounted || _isDisposed) return;
+
+      final newController = CameraController(
+        widget.cameras[cameraIndex],
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+
+      await newController.initialize();
+      if (!mounted || _isDisposed) {
+        await newController.dispose();
+        return;
+      }
+
+      await newController.setFlashMode(_desiredFlashMode);
+
+      _streamGen++;
+      final myGen = _streamGen;
+
+      setState(() {
+        _controller = newController;
+        _currentCameraIndex = cameraIndex;
+        _isInitialized = true;
+        _errorMessage = null;
+      });
+
+      await newController.startImageStream((CameraImage img) {
+        if (_isDisposed || myGen != _streamGen) return;
+        if (!_shouldProcessImage || !_isModelReady) return;
+
+        _latestFrame = img;
+        _latestFrameTimestamp = DateTime.now().millisecondsSinceEpoch;
+      });
+
+      _startProcessingTimer();
+      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+    } catch (e) {
+      debugPrint('[CameraScreen] Camera setup error: $e');
+      _setError('Camera initialization failed');
+    }
+  }
+
+  Future<void> _disposeCamera() async {
+    await _ttsService.stop();
+    _stopProcessingTimer();
+
+    while (_isProcessingFrame && !_isDisposed) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+
+    final old = _controller;
+    if (old == null) {
+      _isInitialized = false;
+      _latestFrame = null;
+      return;
+    }
+
+    if (mounted && !_isDisposed) {
+      setState(() {
+        _controller = null;
+        _isInitialized = false;
+      });
+    } else {
+      _controller = null;
+      _isInitialized = false;
+    }
+
+
+    try {
+      if (old.value.isStreamingImages) {
+        await old.stopImageStream();
+      }
+    } catch (e) {
+      debugPrint('[CameraScreen] stopImageStream error: $e');
+    }
+
+    try {
+      await old.dispose();
+    } catch (e) {
+      debugPrint('[CameraScreen] dispose error: $e');
+    }
+
+    _latestFrame = null;
+  }
+
+  // -------------------- Processing Timer --------------------
+
+  void _startProcessingTimer() {
+    _stopProcessingTimer();
+    if (!_shouldProcessImage || !_isModelReady || _isDisposed) return;
+
+    _processingTimer = Timer.periodic(AppConfig.inferenceInterval, (_) {
+      if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
+      if (_isProcessingFrame) return;
+      if (_latestFrame == null) return;
+
+      // Only process NEW frames since last time.
+      if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
+
+      _processLatestFrame();
+    });
+  }
+
+  void _stopProcessingTimer() {
+    _processingTimer?.cancel();
+    _processingTimer = null;
+  }
+
+  // -------------------- Inference --------------------
+
+  Future<void> _processLatestFrame() async {
+    if (_isDisposed) return;
+    if (_isProcessingFrame) return;
+    if (!_shouldProcessImage || !_isModelReady) return;
+    if (_latestFrame == null) return;
+
+    // Guard against re-processing the same frame.
+    if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
+    _lastProcessedTimestamp = _latestFrameTimestamp;
+
+    _isProcessingFrame = true;
+
+    try {
+      final img = _latestFrame!;
+      final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
+
+      final jpegBytes = await _yuvToJpeg(img, rotation);
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      final response = await _vlmService
+          .describeJpegBytes(
+            jpegBytes,
+            prompt: AppConfig.prompt,
+            maxNewTokens: AppConfig.maxNewTokens,
+          )
+          .timeout(
+            const Duration(seconds: 60),
+            onTimeout: () => throw TimeoutException('VLM request timed out'),
+          );
+
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      _consecutiveErrors = 0;
+
+      final say = response.say.trim();
+      if (say.isEmpty) {
+        _displayText.value = AppConfig.fallbackText;
+        return;
+      }
+
+      // Exact duplicate gate
+      if (_lastSpokenText != null && say == _lastSpokenText) return;
+
+      _lastSpokenText = say;
+      _displayText.value = say;
+
+      if (!_isTtsEnabled) return;
+
+      final decision = _speakPolicy.decide(description: say);
+      if (!decision.shouldSpeak) return;
+
+      final critical = _isCriticalMessage(say);
+      await _speakWithPriority(decision.text, isCritical: critical);
+    } catch (e) {
+      if (_isDisposed || !_shouldProcessImage) return;
+
+      _consecutiveErrors++;
+      debugPrint('[Inference] Error: $e (consecutive: $_consecutiveErrors)');
+
+      if (_consecutiveErrors >= _maxConsecutiveErrors) {
+        _displayText.value = 'Connection issue. Retrying...';
+        await Future.delayed(const Duration(seconds: 5));
+        _consecutiveErrors = 0;
+      } else {
+        _displayText.value = AppConfig.fallbackText;
+        await Future.delayed(Duration(seconds: _consecutiveErrors));
+      }
+    } finally {
+      _isProcessingFrame = false;
+    }
+  }
+
+  Future<Uint8List> _yuvToJpeg(CameraImage img, int rotation) async {
+    final yPlane = img.planes[0];
+    final uPlane = img.planes[1];
+    final vPlane = img.planes[2];
+
+    return compute(yuvToJpegIsolate, <String, dynamic>{
+      'width': img.width,
+      'height': img.height,
+      'y': Uint8List.fromList(yPlane.bytes),
+      'u': Uint8List.fromList(uPlane.bytes),
+      'v': Uint8List.fromList(vPlane.bytes),
+      'yRowStride': yPlane.bytesPerRow,
+      'uvRowStride': uPlane.bytesPerRow,
+      'uvPixelStride': uPlane.bytesPerPixel ?? 1,
+      'maxSide': AppConfig.jpegMaxSide,
+      'jpegQuality': AppConfig.jpegQuality,
+      'rotation': rotation,
+    });
+  }
+
+  // -------------------- Critical Detection --------------------
+
+  bool _isCriticalMessage(String message) {
+    final t = message.toLowerCase();
+
+    // Keep this list narrow: real hazards / collision risks.
+    const keywords = <String>[
+      'สิ่งกีดขวาง',
+      'กีดขวาง',
+      'เสา',
+      'บันได',
+      'ขั้นบันได',
+      'หลุม',
+      'ลื่น',
+      'ขอบ',
+      'ตก',
+      'ผนัง',
+      'กำแพง',
+      'ประตู',
+      'รถ',
+      'จักรยาน',
+      'มอเตอร์ไซค์',
+      'คน',
+      // English
+      'obstacle',
+      'pole',
+      'stairs',
+      'stair',
+      'step',
+      'hole',
+      'slippery',
+      'edge',
+      'wall',
+      'door',
+      'car',
+      'bike',
+      'motorcycle',
+      'person',
+      'pedestrian',
+    ];
+
+    return keywords.any(t.contains);
+  }
+
+  // -------------------- TTS Priority --------------------
+
+  Future<void> _speakWithPriority(String text, {required bool isCritical}) async {
+    if (_isDisposed) return;
+    if (text.trim().isEmpty) return;
+
+    // Critical should interrupt, but do not "stop spam".
+    if (isCritical && _isSpeaking) {
+      _pendingCritical = text;
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final shouldStopNow = now - _lastCriticalStopAtMs > 400; // debounce
+      if (shouldStopNow) {
+        _lastCriticalStopAtMs = now;
+        await _ttsService.stop();
+        _isSpeaking = false;
+      }
+      return;
+    }
+
+    // If currently speaking, drop non-critical.
+    if (_isSpeaking && !isCritical) return;
+
+    _isSpeaking = true;
+
+    try {
+      await _ttsService.speak(text);
+    } catch (e) {
+      debugPrint('[TTS] Error speaking: $e');
+    } finally {
+      _isSpeaking = false;
+
+      // Speak latest pending critical (if any)
+      final pending = _pendingCritical;
+      _pendingCritical = null;
+      if (pending != null && !_isDisposed && _isTtsEnabled) {
+        await _speakWithPriority(pending, isCritical: true);
+      }
+    }
+  }
+
+  // -------------------- Controls --------------------
+
+  Future<void> _switchCamera() async {
+    if (_isDisposed || widget.cameras.length < 2) return;
+
+    _displayText.value = 'Switching camera...';
+
+    final wasProcessing = _shouldProcessImage;
+    _shouldProcessImage = false;
+
+    _stopProcessingTimer();
+    await _ttsService.stop();
+
+    while (_isProcessingFrame && !_isDisposed) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+
+    final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
+    await _ensureCameraInitialized(newIndex);
+
+    _shouldProcessImage = wasProcessing;
+    if (_shouldProcessImage) _startProcessingTimer();
+
+    _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+  }
+
+  Future<void> _toggleFlash() async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    try {
+      final newMode = _desiredFlashMode == FlashMode.off ? FlashMode.torch : FlashMode.off;
+      await controller.setFlashMode(newMode);
+      if (!mounted || _isDisposed) return;
+      setState(() => _desiredFlashMode = newMode);
+    } catch (e) {
+      debugPrint('[CameraScreen] Flash toggle error: $e');
+    }
+  }
+
+  void _toggleProcessing() {
+    if (_isDisposed) return;
+
+    setState(() => _shouldProcessImage = !_shouldProcessImage);
+
+    if (_shouldProcessImage) {
+      _displayText.value = 'Analyzing...';
+      _startProcessingTimer();
+    } else {
+      _displayText.value = 'Stopped';
+      _stopProcessingTimer();
+      _ttsService.stop();
+    }
+  }
+
+  void _toggleTts() {
+    if (_isDisposed) return;
+
+    setState(() => _isTtsEnabled = !_isTtsEnabled);
+
+    _saveSpeechPref(_isTtsEnabled);
+
+    if (!_isTtsEnabled) {
+      _ttsService.stop();
+      _pendingCritical = null;
+      _isSpeaking = false;
+    }
+  }
+
+  Future<void> _saveSpeechPref(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kSpeechKey, enabled);
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+
+    // Refresh UI + TTS after returning from settings
+    await _loadUserSettings();
+    await _ttsService.refreshSettings();
+
+    if (!mounted || _isDisposed) return;
+    setState(() {});
+  }
+
+  void _setError(String message) {
+    if (_isDisposed) return;
+    if (mounted) {
+      setState(() => _errorMessage = message);
+    } else {
+      _errorMessage = message;
+    }
+    _displayText.value = message;
+  }
+
+  // -------------------- UI --------------------
 
   @override
   Widget build(BuildContext context) {
@@ -579,8 +639,9 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildCameraView() {
     final controller = _controller;
-    if (controller == null) return _buildLoadingView();
-    if (!controller.value.isInitialized) return _buildLoadingView();
+    if (controller == null || !controller.value.isInitialized) {
+      return _buildLoadingView();
+    }
 
     final previewSize = controller.value.previewSize;
     if (previewSize == null) return _buildLoadingView();
@@ -597,28 +658,9 @@ class _CameraScreenState extends State<CameraScreen>
             ),
           ),
         ),
-        if (_lastSentImageBytes != null)
-          Positioned(
-            right: 12,
-            top: 80,
-            child: Container(
-              width: 200,
-              height: 180,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white54, width: 2),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Image.memory(
-                _lastSentImageBytes!,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-              ),
-            ),
-          ),
         _buildTopControls(),
         _buildCameraSight(),
-        _buildDisplayTextBox(),
+        if (_subtitleEnabled) _buildDisplayTextBox(),
         _buildBottomControls(),
       ],
     );
@@ -634,16 +676,14 @@ class _CameraScreenState extends State<CameraScreen>
         children: [
           _buildCircleButton(
             icon: Icons.settings,
-            onTap: _openSettings,
+            onTap: () => unawaited(_openSettings()),
           ),
           _buildCircleButton(
             icon: _desiredFlashMode == FlashMode.torch
                 ? Icons.flash_on
                 : Icons.flash_off,
-            onTap: _toggleFlash,
-            color: _desiredFlashMode == FlashMode.torch
-                ? Colors.yellow
-                : Colors.white,
+            onTap: () => unawaited(_toggleFlash()),
+            color: _desiredFlashMode == FlashMode.torch ? Colors.yellow : Colors.white,
           ),
         ],
       ),
@@ -669,9 +709,14 @@ class _CameraScreenState extends State<CameraScreen>
         valueListenable: _displayText,
         builder: (context, text, child) {
           Color borderColor = Colors.white24;
-          final lower = text.toLowerCase();
-          if (lower.contains('unclear') || lower.contains('difficult')) {
-            borderColor = Colors.orange;
+
+          if (_isCriticalMessage(text)) {
+            borderColor = Colors.red;
+          } else {
+            final lower = text.toLowerCase();
+            if (lower.contains('unclear') || lower.contains('difficult')) {
+              borderColor = Colors.orange;
+            }
           }
 
           return Container(
@@ -710,7 +755,7 @@ class _CameraScreenState extends State<CameraScreen>
             if (widget.cameras.length > 1)
               _buildCircleButton(
                 icon: Icons.flip_camera_ios,
-                onTap: _switchCamera,
+                onTap: () => unawaited(_switchCamera()),
               )
             else
               const SizedBox(width: 44),
@@ -817,19 +862,11 @@ class _CameraScreenState extends State<CameraScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
-              Icons.camera_alt_outlined,
-              size: 80,
-              color: Colors.white54,
-            ),
+            const Icon(Icons.camera_alt_outlined, size: 80, color: Colors.white54),
             const SizedBox(height: 16),
             const Text(
               'Camera Access Required',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
@@ -847,10 +884,7 @@ class _CameraScreenState extends State<CameraScreen>
             const SizedBox(height: 12),
             TextButton(
               onPressed: _requestCameraPermission,
-              child: const Text(
-                'Try Again',
-                style: TextStyle(color: Colors.white70),
-              ),
+              child: const Text('Try Again', style: TextStyle(color: Colors.white70)),
             ),
           ],
         ),
@@ -899,50 +933,25 @@ class _CameraSightPainter extends CustomPainter {
     const cornerLength = 20.0;
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // Top-left
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(cornerLength, 0), paint);
     canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, cornerLength), paint);
 
-    // Top-right
     canvas.drawLine(rect.topRight, rect.topRight - const Offset(cornerLength, 0), paint);
     canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, cornerLength), paint);
 
-    // Bottom-left
     canvas.drawLine(rect.bottomLeft, rect.bottomLeft + const Offset(cornerLength, 0), paint);
     canvas.drawLine(rect.bottomLeft, rect.bottomLeft - const Offset(0, cornerLength), paint);
 
-    // Bottom-right
     canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(cornerLength, 0), paint);
     canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(0, cornerLength), paint);
 
-    // Center dot
-    canvas.drawCircle(rect.center, 2, Paint()..color = Colors.white);
+    canvas.drawLine(
+      rect.center,
+      rect.center + const Offset(2, 0),
+      Paint()..color = Colors.white,
+    );
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _YuvSnapshot {
-  final int width;
-  final int height;
-  final Uint8List y;
-  final Uint8List u;
-  final Uint8List v;
-  final int yRowStride;
-  final int uvRowStride;
-  final int uvPixelStride;
-  final int rotation;
-
-  _YuvSnapshot({
-    required this.width,
-    required this.height,
-    required this.y,
-    required this.u,
-    required this.v,
-    required this.yRowStride,
-    required this.uvRowStride,
-    required this.uvPixelStride,
-    required this.rotation,
-  });
 }

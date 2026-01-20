@@ -20,6 +20,7 @@ class _LoadingScreenState extends State<LoadingScreen>
 
   String _status = 'Preparing application...';
   String? _error;
+  bool _bootstrapping = false;
 
   @override
   void initState() {
@@ -27,30 +28,31 @@ class _LoadingScreenState extends State<LoadingScreen>
 
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
+
     _pulse = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
 
     _bootstrap();
   }
 
   Future<void> _bootstrap() async {
+    if (_bootstrapping) return;
+    _bootstrapping = true;
+
     try {
+      if (!mounted) return;
       setState(() {
         _error = null;
-        _status = 'Creating VLM service...';
+        _status = 'Initializing vision model...';
       });
-
-      // // TODO: replace with your FastVLM Space base URL (no trailing slash preferred)
-      // const fastVlmBaseUrl = 'https://YOUR-SPACE-NAME.hf.space';
 
       final vlm = FastVlmService(
         AppConfig.vlmBaseUrl,
-        // timeout can be adjusted; Free Space sometimes needs longer on cold start
         timeout: const Duration(seconds: 90),
       );
 
-      // Optional: warm-up (no-op unless you add an endpoint; keep for future)
+      // Warm-up (kept as-is; safe even if no-op)
       setState(() => _status = 'Warming up model...');
       await vlm.ensureInitialized();
 
@@ -62,14 +64,21 @@ class _LoadingScreenState extends State<LoadingScreen>
 
       if (!mounted) return;
 
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => CameraScreen(cameras: cams, vlmService: vlm),
+      // Use fade transition to “match RN” (smooth + consistent feel)
+      await Navigator.of(context).pushReplacement(
+        PageRouteBuilder(
+          pageBuilder: (_, __, ___) => CameraScreen(cameras: cams, vlmService: vlm),
+          transitionsBuilder: (_, animation, __, child) {
+            return FadeTransition(opacity: animation, child: child);
+          },
+          transitionDuration: const Duration(milliseconds: 200),
         ),
       );
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
+    } finally {
+      _bootstrapping = false;
     }
   }
 
@@ -82,15 +91,20 @@ class _LoadingScreenState extends State<LoadingScreen>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 440),
+            constraints: const BoxConstraints(maxWidth: 520),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: _error != null ? _buildError() : _buildProgress(),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                child: _error != null ? _buildError(cs) : _buildProgress(cs),
+              ),
             ),
           ),
         ),
@@ -98,53 +112,73 @@ class _LoadingScreenState extends State<LoadingScreen>
     );
   }
 
-  Widget _buildProgress() {
+  Widget _buildProgress(ColorScheme cs) {
     return Column(
+      key: const ValueKey('progress'),
       mainAxisSize: MainAxisSize.min,
       children: [
         ScaleTransition(
           scale: _pulse,
-          child: const Icon(Icons.auto_awesome, size: 80),
+          child: Icon(Icons.auto_awesome, size: 72, color: cs.primary),
         ),
         const SizedBox(height: 16),
         Text(
           _status,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 16),
+          style: TextStyle(
+            fontSize: 15,
+            height: 1.3,
+            color: cs.onSurface,
+          ),
         ),
         const SizedBox(height: 16),
-        const SizedBox(
+        SizedBox(
           width: 40,
           height: 40,
-          child: CircularProgressIndicator(strokeWidth: 2),
+          child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          'Please keep the app open',
+          style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
         ),
       ],
     );
   }
 
-  Widget _buildError() {
+  Widget _buildError(ColorScheme cs) {
     final msg = _error ?? 'Unknown error';
     return Column(
+      key: const ValueKey('error'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Icon(Icons.error_outline, size: 64),
+        Icon(Icons.error_outline, size: 64, color: cs.error),
         const SizedBox(height: 12),
-        const Text(
+        Text(
           'Initialization failed',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+            color: cs.onSurface,
+          ),
         ),
         const SizedBox(height: 8),
-        Text(msg, textAlign: TextAlign.center),
+        Text(
+          msg,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: cs.onSurfaceVariant),
+        ),
         const SizedBox(height: 16),
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
           children: [
-            TextButton(
+            OutlinedButton(
               onPressed: () => SystemNavigator.pop(),
               child: const Text('Exit'),
             ),
-            const SizedBox(width: 12),
-            ElevatedButton(
+            FilledButton(
               onPressed: () {
                 setState(() => _error = null);
                 _bootstrap();
