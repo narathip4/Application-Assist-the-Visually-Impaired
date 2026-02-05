@@ -1,6 +1,8 @@
-// lib/screens/camera_screen.dart
 import 'dart:async';
-import 'dart:typed_data';
+
+import 'widgets/camera_sight_painter.dart';
+import 'widgets/circle_button.dart';
+import 'widgets/display_text_box.dart';
 
 import 'package:app/app/config.dart';
 import 'package:camera/camera.dart';
@@ -9,11 +11,14 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../isolates/yuv_to_jpeg_isolate.dart';
 import '../screens/setting_screen.dart';
+
 import '../services/tts/speak_policy.dart';
 import '../services/tts/tts_service.dart';
+import '../services/tts/speech_coordinator.dart';
+
 import '../services/vlm/fast_vlm_service.dart';
+import '../services/vlm/frame_inference.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -25,8 +30,9 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
-  // -------------------- Pref keys (must match Settings screens) --------------------
+class _CameraScreenState extends State<CameraScreen>
+    with WidgetsBindingObserver {
+  // -------------------- Pref keys --------------------
   static const String _kSpeechKey = 'ui.speech';
   static const String _kSubtitleKey = 'ui.subtitle';
 
@@ -39,11 +45,13 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
   // -------------------- VLM --------------------
   late final FastVlmService _vlmService;
+  late final FrameInference _inference;
   bool _isModelReady = false;
 
   // -------------------- TTS --------------------
   late final TtsService _ttsService;
   late final SpeakPolicy _speakPolicy;
+  late final SpeechCoordinator _speech;
 
   bool _isTtsEnabled = true;
   bool _subtitleEnabled = true;
@@ -63,13 +71,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   int _consecutiveErrors = 0;
   static const int _maxConsecutiveErrors = 3;
 
-  // -------------------- TTS Priority Control --------------------
-  bool _isSpeaking = false;
-  String? _pendingCritical;
-  int _lastCriticalStopAtMs = 0;
-
   // -------------------- UI --------------------
-  final ValueNotifier<String> _displayText = ValueNotifier<String>('Initializing...');
+  final ValueNotifier<String> _displayText = ValueNotifier<String>(
+    'Initializing...',
+  );
   String? _errorMessage;
 
   // -------------------- Lifecycle --------------------
@@ -83,6 +88,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     WidgetsBinding.instance.addObserver(this);
 
     _ttsService = TtsService();
+    _speech = SpeechCoordinator(tts: _ttsService);
     _speakPolicy = SpeakPolicy(cooldown: const Duration(seconds: 2));
 
     final svc = widget.vlmService;
@@ -90,7 +96,9 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       _setError('VLM service not provided');
       return;
     }
+
     _vlmService = svc;
+    _inference = FrameInference(vlmService: _vlmService);
 
     _initializeApp();
   }
@@ -108,14 +116,13 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
       if (_isDisposed) return;
 
-      // Apply any TTS settings (speech rate etc.) from prefs
       await _ttsService.refreshSettings();
 
       if (_isPermissionGranted && widget.cameras.isNotEmpty) {
         await _ensureCameraInitialized(_currentCameraIndex);
       }
     } catch (e) {
-      debugPrint('[CameraScreen] Initialization error: $e');
+      debugPrint('[CameraScreen] Init error: $e');
       _setError('Failed to initialize app');
     }
   }
@@ -129,18 +136,13 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Future<void> _requestCameraPermission() async {
-    try {
-      final status = await Permission.camera.request();
-      if (!mounted || _isDisposed) return;
+    final status = await Permission.camera.request();
+    if (!mounted || _isDisposed) return;
 
-      setState(() => _isPermissionGranted = status == PermissionStatus.granted);
+    setState(() => _isPermissionGranted = status == PermissionStatus.granted);
 
-      if (!_isPermissionGranted) {
-        _setError('Camera permission denied');
-      }
-    } catch (e) {
-      debugPrint('[CameraScreen] Permission error: $e');
-      _setError('Failed to request camera permission');
+    if (!_isPermissionGranted) {
+      _setError('Camera permission denied');
     }
   }
 
@@ -153,8 +155,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
     } catch (e) {
       debugPrint('[CameraScreen] Model warmup error: $e');
-      if (!mounted || _isDisposed) return;
-      setState(() => _isModelReady = false);
       _setError('AI model failed to load');
     }
   }
@@ -166,7 +166,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     if (_isDisposed) return;
 
     if (state == AppLifecycleState.paused) {
-      await _ttsService.stop();
+      await _speech.stop();
       _stopProcessingTimer();
       await _disposeCamera();
     } else if (state == AppLifecycleState.resumed) {
@@ -184,6 +184,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     WidgetsBinding.instance.removeObserver(this);
 
     _stopProcessingTimer();
+    _speech.stop();
     _ttsService.dispose();
 
     final old = _controller;
@@ -194,14 +195,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       Future.microtask(() async {
         try {
           if (old.value.isStreamingImages) await old.stopImageStream();
-        } catch (e) {
-          debugPrint('[CameraScreen] Cleanup stopImageStream error: $e');
-        }
-        try {
           await old.dispose();
-        } catch (e) {
-          debugPrint('[CameraScreen] Cleanup dispose error: $e');
-        }
+        } catch (_) {}
       });
     }
 
@@ -216,14 +211,15 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       if (_isDisposed) return;
 
       final c = _controller;
-      final alreadyOk = _isInitialized &&
+      final alreadyOk =
+          _isInitialized &&
           _currentCameraIndex == cameraIndex &&
           c != null &&
           c.value.isInitialized;
 
-      if (alreadyOk) return;
-
-      await _setupCamera(cameraIndex);
+      if (!alreadyOk) {
+        await _setupCamera(cameraIndex);
+      }
     });
 
     return _setupChain;
@@ -232,10 +228,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   Future<void> _setupCamera(int cameraIndex) async {
     if (_isDisposed || widget.cameras.isEmpty) return;
 
-    try {
-      await _disposeCamera();
-      if (!mounted || _isDisposed) return;
+    await _disposeCamera();
+    if (!mounted || _isDisposed) return;
 
+    try {
       final newController = CameraController(
         widget.cameras[cameraIndex],
         ResolutionPreset.medium,
@@ -244,11 +240,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       );
 
       await newController.initialize();
-      if (!mounted || _isDisposed) {
-        await newController.dispose();
-        return;
-      }
-
       await newController.setFlashMode(_desiredFlashMode);
 
       _streamGen++;
@@ -261,7 +252,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         _errorMessage = null;
       });
 
-      await newController.startImageStream((CameraImage img) {
+      await newController.startImageStream((img) {
         if (_isDisposed || myGen != _streamGen) return;
         if (!_shouldProcessImage || !_isModelReady) return;
 
@@ -278,7 +269,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Future<void> _disposeCamera() async {
-    await _ttsService.stop();
     _stopProcessingTimer();
 
     while (_isProcessingFrame && !_isDisposed) {
@@ -286,36 +276,15 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     }
 
     final old = _controller;
-    if (old == null) {
-      _isInitialized = false;
-      _latestFrame = null;
-      return;
-    }
+    if (old == null) return;
 
-    if (mounted && !_isDisposed) {
-      setState(() {
-        _controller = null;
-        _isInitialized = false;
-      });
-    } else {
-      _controller = null;
-      _isInitialized = false;
-    }
-
+    _controller = null;
+    _isInitialized = false;
 
     try {
-      if (old.value.isStreamingImages) {
-        await old.stopImageStream();
-      }
-    } catch (e) {
-      debugPrint('[CameraScreen] stopImageStream error: $e');
-    }
-
-    try {
+      if (old.value.isStreamingImages) await old.stopImageStream();
       await old.dispose();
-    } catch (e) {
-      debugPrint('[CameraScreen] dispose error: $e');
-    }
+    } catch (_) {}
 
     _latestFrame = null;
   }
@@ -330,8 +299,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
       if (_isProcessingFrame) return;
       if (_latestFrame == null) return;
-
-      // Only process NEW frames since last time.
       if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
 
       _processLatestFrame();
@@ -346,12 +313,14 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   // -------------------- Inference --------------------
 
   Future<void> _processLatestFrame() async {
-    if (_isDisposed) return;
-    if (_isProcessingFrame) return;
-    if (!_shouldProcessImage || !_isModelReady) return;
-    if (_latestFrame == null) return;
+    if (_isDisposed ||
+        _isProcessingFrame ||
+        !_shouldProcessImage ||
+        !_isModelReady ||
+        _latestFrame == null) {
+      return;
+    }
 
-    // Guard against re-processing the same frame.
     if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
     _lastProcessedTimestamp = _latestFrameTimestamp;
 
@@ -361,34 +330,20 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       final img = _latestFrame!;
       final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
 
-      final jpegBytes = await _yuvToJpeg(img, rotation);
-      if (_isDisposed || !_shouldProcessImage) return;
-
-      final response = await _vlmService
-          .describeJpegBytes(
-            jpegBytes,
-            prompt: AppConfig.prompt,
-            maxNewTokens: AppConfig.maxNewTokens,
-          )
-          .timeout(
-            const Duration(seconds: 60),
-            onTimeout: () => throw TimeoutException('VLM request timed out'),
-          );
-
+      final sayRaw = await _inference.describe(img, rotation: rotation);
       if (_isDisposed || !_shouldProcessImage) return;
 
       _consecutiveErrors = 0;
 
-      final say = response.say.trim();
+      final say = sayRaw.trim();
       if (say.isEmpty) {
         _displayText.value = AppConfig.fallbackText;
         return;
       }
 
-      // Exact duplicate gate
-      if (_lastSpokenText != null && say == _lastSpokenText) return;
-
+      if (_lastSpokenText == say) return;
       _lastSpokenText = say;
+
       _displayText.value = say;
 
       if (!_isTtsEnabled) return;
@@ -396,129 +351,23 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       final decision = _speakPolicy.decide(description: say);
       if (!decision.shouldSpeak) return;
 
-      final critical = _isCriticalMessage(say);
-      await _speakWithPriority(decision.text, isCritical: critical);
+      final critical = _speech.isCriticalMessage(say);
+      await _speech.speak(
+        decision.text,
+        isCritical: critical,
+        ttsEnabled: _isTtsEnabled,
+      );
     } catch (e) {
-      if (_isDisposed || !_shouldProcessImage) return;
-
       _consecutiveErrors++;
-      debugPrint('[Inference] Error: $e (consecutive: $_consecutiveErrors)');
+      debugPrint('[Inference] Error: $e ($_consecutiveErrors)');
 
+      _displayText.value = AppConfig.fallbackText;
       if (_consecutiveErrors >= _maxConsecutiveErrors) {
-        _displayText.value = 'Connection issue. Retrying...';
-        await Future.delayed(const Duration(seconds: 5));
+        await Future.delayed(const Duration(seconds: 3));
         _consecutiveErrors = 0;
-      } else {
-        _displayText.value = AppConfig.fallbackText;
-        await Future.delayed(Duration(seconds: _consecutiveErrors));
       }
     } finally {
       _isProcessingFrame = false;
-    }
-  }
-
-  Future<Uint8List> _yuvToJpeg(CameraImage img, int rotation) async {
-    final yPlane = img.planes[0];
-    final uPlane = img.planes[1];
-    final vPlane = img.planes[2];
-
-    return compute(yuvToJpegIsolate, <String, dynamic>{
-      'width': img.width,
-      'height': img.height,
-      'y': Uint8List.fromList(yPlane.bytes),
-      'u': Uint8List.fromList(uPlane.bytes),
-      'v': Uint8List.fromList(vPlane.bytes),
-      'yRowStride': yPlane.bytesPerRow,
-      'uvRowStride': uPlane.bytesPerRow,
-      'uvPixelStride': uPlane.bytesPerPixel ?? 1,
-      'maxSide': AppConfig.jpegMaxSide,
-      'jpegQuality': AppConfig.jpegQuality,
-      'rotation': rotation,
-    });
-  }
-
-  // -------------------- Critical Detection --------------------
-
-  bool _isCriticalMessage(String message) {
-    final t = message.toLowerCase();
-
-    // Keep this list narrow: real hazards / collision risks.
-    const keywords = <String>[
-      'สิ่งกีดขวาง',
-      'กีดขวาง',
-      'เสา',
-      'บันได',
-      'ขั้นบันได',
-      'หลุม',
-      'ลื่น',
-      'ขอบ',
-      'ตก',
-      'ผนัง',
-      'กำแพง',
-      'ประตู',
-      'รถ',
-      'จักรยาน',
-      'มอเตอร์ไซค์',
-      'คน',
-      // English
-      'obstacle',
-      'pole',
-      'stairs',
-      'stair',
-      'step',
-      'hole',
-      'slippery',
-      'edge',
-      'wall',
-      'door',
-      'car',
-      'bike',
-      'motorcycle',
-      'person',
-      'pedestrian',
-    ];
-
-    return keywords.any(t.contains);
-  }
-
-  // -------------------- TTS Priority --------------------
-
-  Future<void> _speakWithPriority(String text, {required bool isCritical}) async {
-    if (_isDisposed) return;
-    if (text.trim().isEmpty) return;
-
-    // Critical should interrupt, but do not "stop spam".
-    if (isCritical && _isSpeaking) {
-      _pendingCritical = text;
-
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final shouldStopNow = now - _lastCriticalStopAtMs > 400; // debounce
-      if (shouldStopNow) {
-        _lastCriticalStopAtMs = now;
-        await _ttsService.stop();
-        _isSpeaking = false;
-      }
-      return;
-    }
-
-    // If currently speaking, drop non-critical.
-    if (_isSpeaking && !isCritical) return;
-
-    _isSpeaking = true;
-
-    try {
-      await _ttsService.speak(text);
-    } catch (e) {
-      debugPrint('[TTS] Error speaking: $e');
-    } finally {
-      _isSpeaking = false;
-
-      // Speak latest pending critical (if any)
-      final pending = _pendingCritical;
-      _pendingCritical = null;
-      if (pending != null && !_isDisposed && _isTtsEnabled) {
-        await _speakWithPriority(pending, isCritical: true);
-      }
     }
   }
 
@@ -528,12 +377,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     if (_isDisposed || widget.cameras.length < 2) return;
 
     _displayText.value = 'Switching camera...';
-
-    final wasProcessing = _shouldProcessImage;
     _shouldProcessImage = false;
 
     _stopProcessingTimer();
-    await _ttsService.stop();
+    await _speech.stop();
 
     while (_isProcessingFrame && !_isDisposed) {
       await Future.delayed(const Duration(milliseconds: 50));
@@ -542,24 +389,21 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
     await _ensureCameraInitialized(newIndex);
 
-    _shouldProcessImage = wasProcessing;
-    if (_shouldProcessImage) _startProcessingTimer();
-
-    _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+    _shouldProcessImage = true;
+    _startProcessingTimer();
+    _displayText.value = 'Analyzing...';
   }
 
   Future<void> _toggleFlash() async {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
 
-    try {
-      final newMode = _desiredFlashMode == FlashMode.off ? FlashMode.torch : FlashMode.off;
-      await controller.setFlashMode(newMode);
-      if (!mounted || _isDisposed) return;
-      setState(() => _desiredFlashMode = newMode);
-    } catch (e) {
-      debugPrint('[CameraScreen] Flash toggle error: $e');
-    }
+    final newMode = _desiredFlashMode == FlashMode.off
+        ? FlashMode.torch
+        : FlashMode.off;
+    await controller.setFlashMode(newMode);
+    if (!mounted || _isDisposed) return;
+    setState(() => _desiredFlashMode = newMode);
   }
 
   void _toggleProcessing() {
@@ -573,7 +417,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     } else {
       _displayText.value = 'Stopped';
       _stopProcessingTimer();
-      _ttsService.stop();
+      _speech.stop();
     }
   }
 
@@ -581,13 +425,10 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     if (_isDisposed) return;
 
     setState(() => _isTtsEnabled = !_isTtsEnabled);
-
     _saveSpeechPref(_isTtsEnabled);
 
     if (!_isTtsEnabled) {
-      _ttsService.stop();
-      _pendingCritical = null;
-      _isSpeaking = false;
+      _speech.stop();
     }
   }
 
@@ -602,21 +443,15 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       MaterialPageRoute(builder: (_) => const SettingsScreen()),
     );
 
-    // Refresh UI + TTS after returning from settings
     await _loadUserSettings();
     await _ttsService.refreshSettings();
-
     if (!mounted || _isDisposed) return;
     setState(() {});
   }
 
   void _setError(String message) {
     if (_isDisposed) return;
-    if (mounted) {
-      setState(() => _errorMessage = message);
-    } else {
-      _errorMessage = message;
-    }
+    setState(() => _errorMessage = message);
     _displayText.value = message;
   }
 
@@ -638,14 +473,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
 
   Widget _buildCameraView() {
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) {
-      return _buildLoadingView();
-    }
-
-    final previewSize = controller.value.previewSize;
-    if (previewSize == null) return _buildLoadingView();
-
+    final controller = _controller!;
+    final previewSize = controller.value.previewSize!;
     return Stack(
       children: [
         Positioned.fill(
@@ -659,8 +488,18 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
           ),
         ),
         _buildTopControls(),
-        _buildCameraSight(),
-        if (_subtitleEnabled) _buildDisplayTextBox(),
+        Center(
+          child: SizedBox(
+            width: 200,
+            height: 200,
+            child: CustomPaint(painter: CameraSightPainter()),
+          ),
+        ),
+        DisplayTextBox(
+          textListenable: _displayText,
+          isCritical: _speech.isCriticalMessage,
+          subtitleEnabled: _subtitleEnabled,
+        ),
         _buildBottomControls(),
       ],
     );
@@ -674,69 +513,20 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _buildCircleButton(
+          CircleButton(
             icon: Icons.settings,
             onTap: () => unawaited(_openSettings()),
           ),
-          _buildCircleButton(
+          CircleButton(
             icon: _desiredFlashMode == FlashMode.torch
                 ? Icons.flash_on
                 : Icons.flash_off,
             onTap: () => unawaited(_toggleFlash()),
-            color: _desiredFlashMode == FlashMode.torch ? Colors.yellow : Colors.white,
+            color: _desiredFlashMode == FlashMode.torch
+                ? Colors.yellow
+                : Colors.white,
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildCameraSight() {
-    return Center(
-      child: SizedBox(
-        width: 200,
-        height: 200,
-        child: CustomPaint(painter: _CameraSightPainter()),
-      ),
-    );
-  }
-
-  Widget _buildDisplayTextBox() {
-    return Positioned(
-      bottom: 120,
-      left: 20,
-      right: 20,
-      child: ValueListenableBuilder<String>(
-        valueListenable: _displayText,
-        builder: (context, text, child) {
-          Color borderColor = Colors.white24;
-
-          if (_isCriticalMessage(text)) {
-            borderColor = Colors.red;
-          } else {
-            final lower = text.toLowerCase();
-            if (lower.contains('unclear') || lower.contains('difficult')) {
-              borderColor = Colors.orange;
-            }
-          }
-
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.7),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: borderColor, width: 2),
-            ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                height: 1.4,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          );
-        },
       ),
     );
   }
@@ -753,14 +543,14 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
             if (widget.cameras.length > 1)
-              _buildCircleButton(
+              CircleButton(
                 icon: Icons.flip_camera_ios,
                 onTap: () => unawaited(_switchCamera()),
               )
             else
               const SizedBox(width: 44),
             _buildStartStopButton(),
-            _buildCircleButton(
+            CircleButton(
               icon: _isTtsEnabled ? Icons.volume_up : Icons.volume_off,
               onTap: _toggleTts,
               color: _isTtsEnabled ? Colors.white : Colors.white54,
@@ -779,13 +569,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         decoration: BoxDecoration(
           color: _shouldProcessImage ? Colors.red : Colors.green,
           borderRadius: BorderRadius.circular(25),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.3),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -793,16 +576,13 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
             Icon(
               _shouldProcessImage ? Icons.stop : Icons.play_arrow,
               color: Colors.white,
-              size: 28,
             ),
             const SizedBox(width: 8),
             Text(
               _shouldProcessImage ? 'STOP' : 'START',
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 16,
                 fontWeight: FontWeight.bold,
-                letterSpacing: 1.2,
               ),
             ),
           ],
@@ -816,13 +596,12 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+          const CircularProgressIndicator(color: Colors.white),
           const SizedBox(height: 16),
           ValueListenableBuilder<String>(
             valueListenable: _displayText,
-            builder: (context, text, child) {
-              return Text(text, style: const TextStyle(color: Colors.white));
-            },
+            builder: (_, text, __) =>
+                Text(text, style: const TextStyle(color: Colors.white)),
           ),
         ],
       ),
@@ -832,7 +611,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   Widget _buildErrorView() {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -843,12 +622,6 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
               style: const TextStyle(color: Colors.white, fontSize: 18),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () => _ensureCameraInitialized(_currentCameraIndex),
-              icon: const Icon(Icons.refresh),
-              label: const Text('Retry'),
-            ),
           ],
         ),
       ),
@@ -858,100 +631,30 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   Widget _buildPermissionDeniedView() {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.camera_alt_outlined, size: 80, color: Colors.white54),
+            const Icon(
+              Icons.camera_alt_outlined,
+              size: 80,
+              color: Colors.white54,
+            ),
             const SizedBox(height: 16),
             const Text(
               'Camera Access Required',
-              style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+              style: TextStyle(color: Colors.white, fontSize: 20),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'This app needs camera access to analyze your surroundings in real-time.',
-              style: TextStyle(color: Colors.white70, fontSize: 14),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
             ElevatedButton.icon(
-              onPressed: () => openAppSettings(),
+              onPressed: openAppSettings,
               icon: const Icon(Icons.settings),
               label: const Text('Open Settings'),
             ),
-            const SizedBox(height: 12),
-            TextButton(
-              onPressed: _requestCameraPermission,
-              child: const Text('Try Again', style: TextStyle(color: Colors.white70)),
-            ),
           ],
         ),
       ),
     );
   }
-
-  Widget _buildCircleButton({
-    required IconData icon,
-    required VoidCallback onTap,
-    Color color = Colors.white,
-    Color bgColor = const Color.fromARGB(100, 0, 0, 0),
-    double size = 44,
-    double iconSize = 24,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: bgColor,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.3),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Icon(icon, color: color, size: iconSize),
-      ),
-    );
-  }
-}
-
-class _CameraSightPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke;
-
-    const cornerLength = 20.0;
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
-
-    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(cornerLength, 0), paint);
-    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, cornerLength), paint);
-
-    canvas.drawLine(rect.topRight, rect.topRight - const Offset(cornerLength, 0), paint);
-    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, cornerLength), paint);
-
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + const Offset(cornerLength, 0), paint);
-    canvas.drawLine(rect.bottomLeft, rect.bottomLeft - const Offset(0, cornerLength), paint);
-
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(cornerLength, 0), paint);
-    canvas.drawLine(rect.bottomRight, rect.bottomRight - const Offset(0, cornerLength), paint);
-
-    canvas.drawLine(
-      rect.center,
-      rect.center + const Offset(2, 0),
-      Paint()..color = Colors.white,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
