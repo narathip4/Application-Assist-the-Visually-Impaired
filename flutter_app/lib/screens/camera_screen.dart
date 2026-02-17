@@ -6,7 +6,6 @@ import 'widgets/display_text_box.dart';
 
 import 'package:app/app/config.dart';
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -35,12 +34,15 @@ class _CameraScreenState extends State<CameraScreen>
   // -------------------- Pref keys --------------------
   static const String _kSpeechKey = 'ui.speech';
   static const String _kSubtitleKey = 'ui.subtitle';
+  static const String _kStatusAnalyzing = 'Analyzing...';
+  static const String _kStatusStopped = 'Stopped';
 
   // -------------------- Camera --------------------
   CameraController? _controller;
   int _currentCameraIndex = 0;
   bool _isInitialized = false;
   bool _isPermissionGranted = false;
+  bool _isSwitchingCamera = false;
   FlashMode _desiredFlashMode = FlashMode.off;
 
   // -------------------- VLM --------------------
@@ -65,8 +67,9 @@ class _CameraScreenState extends State<CameraScreen>
   CameraImage? _latestFrame;
   int _latestFrameTimestamp = 0;
   int _lastProcessedTimestamp = 0;
+  int _droppedTicks = 0;
 
-  String? _lastSpokenText;
+  static const int _dropTickLogEvery = 20;
 
   int _consecutiveErrors = 0;
   static const int _maxConsecutiveErrors = 3;
@@ -152,7 +155,9 @@ class _CameraScreenState extends State<CameraScreen>
       await _vlmService.ensureInitialized();
       if (!mounted || _isDisposed) return;
       setState(() => _isModelReady = true);
-      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+      _displayText.value = _shouldProcessImage
+          ? _kStatusAnalyzing
+          : _kStatusStopped;
     } catch (e) {
       debugPrint('[CameraScreen] Model warmup error: $e');
       _setError('AI model failed to load');
@@ -261,7 +266,9 @@ class _CameraScreenState extends State<CameraScreen>
       });
 
       _startProcessingTimer();
-      _displayText.value = _shouldProcessImage ? 'Analyzing...' : 'Stopped';
+      _displayText.value = _shouldProcessImage
+          ? _kStatusAnalyzing
+          : _kStatusStopped;
     } catch (e) {
       debugPrint('[CameraScreen] Camera setup error: $e');
       _setError('Camera initialization failed');
@@ -270,16 +277,21 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _disposeCamera() async {
     _stopProcessingTimer();
-
-    while (_isProcessingFrame && !_isDisposed) {
-      await Future.delayed(const Duration(milliseconds: 50));
-    }
+    await _waitForOngoingFrameProcessing();
 
     final old = _controller;
     if (old == null) return;
 
-    _controller = null;
-    _isInitialized = false;
+    if (mounted && !_isDisposed) {
+      setState(() {
+        _controller = null;
+        _isInitialized = false;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+    } else {
+      _controller = null;
+      _isInitialized = false;
+    }
 
     try {
       if (old.value.isStreamingImages) await old.stopImageStream();
@@ -287,6 +299,12 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (_) {}
 
     _latestFrame = null;
+  }
+
+  Future<void> _waitForOngoingFrameProcessing() async {
+    while (_isProcessingFrame && !_isDisposed) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
   }
 
   // -------------------- Processing Timer --------------------
@@ -297,9 +315,18 @@ class _CameraScreenState extends State<CameraScreen>
 
     _processingTimer = Timer.periodic(AppConfig.inferenceInterval, (_) {
       if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
-      if (_isProcessingFrame) return;
-      if (_latestFrame == null) return;
-      if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
+      if (_isProcessingFrame) {
+        _countDroppedTick();
+        return;
+      }
+      if (_latestFrame == null) {
+        _countDroppedTick();
+        return;
+      }
+      if (_latestFrameTimestamp <= _lastProcessedTimestamp) {
+        _countDroppedTick();
+        return;
+      }
 
       _processLatestFrame();
     });
@@ -330,7 +357,11 @@ class _CameraScreenState extends State<CameraScreen>
       final img = _latestFrame!;
       final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
 
+      final inferenceStartMs = DateTime.now().millisecondsSinceEpoch;
       final sayRaw = await _inference.describe(img, rotation: rotation);
+      final inferenceLatencyMs =
+          DateTime.now().millisecondsSinceEpoch - inferenceStartMs;
+      debugPrint('[Inference] latency=${inferenceLatencyMs}ms');
       if (_isDisposed || !_shouldProcessImage) return;
 
       _consecutiveErrors = 0;
@@ -341,20 +372,23 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
-      if (_lastSpokenText == say) return;
-      _lastSpokenText = say;
-
       _displayText.value = say;
 
       if (!_isTtsEnabled) return;
 
-      final decision = _speakPolicy.decide(description: say);
-      if (!decision.shouldSpeak) return;
+      final decision = _speech.evaluate(say);
 
-      final critical = _speech.isCriticalMessage(say);
+      if (!decision.allowSpeak) return;
+
+      final speakDecision = _speakPolicy.decide(
+        description: say,
+        isCritical: decision.isCritical,
+      );
+      if (!speakDecision.shouldSpeak) return;
+
       await _speech.speak(
-        decision.text,
-        isCritical: critical,
+        speakDecision.text,
+        isCritical: decision.isCritical,
         ttsEnabled: _isTtsEnabled,
       );
     } catch (e) {
@@ -371,27 +405,45 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  void _countDroppedTick() {
+    _droppedTicks++;
+    if (_droppedTicks % _dropTickLogEvery == 0) {
+      debugPrint('[Inference] droppedTicks=$_droppedTicks');
+    }
+  }
+
   // -------------------- Controls --------------------
 
   Future<void> _switchCamera() async {
-    if (_isDisposed || widget.cameras.length < 2) return;
+    if (_isDisposed || widget.cameras.length < 2 || _isSwitchingCamera) return;
+
+    if (mounted && !_isDisposed) {
+      setState(() => _isSwitchingCamera = true);
+    } else {
+      _isSwitchingCamera = true;
+    }
 
     _displayText.value = 'Switching camera...';
     _shouldProcessImage = false;
 
-    _stopProcessingTimer();
-    await _speech.stop();
+    try {
+      _stopProcessingTimer();
+      await _speech.stop();
+      await _waitForOngoingFrameProcessing();
 
-    while (_isProcessingFrame && !_isDisposed) {
-      await Future.delayed(const Duration(milliseconds: 50));
+      final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
+      await _ensureCameraInitialized(newIndex);
+
+      _shouldProcessImage = true;
+      _startProcessingTimer();
+      _displayText.value = _kStatusAnalyzing;
+    } finally {
+      if (mounted && !_isDisposed) {
+        setState(() => _isSwitchingCamera = false);
+      } else {
+        _isSwitchingCamera = false;
+      }
     }
-
-    final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
-    await _ensureCameraInitialized(newIndex);
-
-    _shouldProcessImage = true;
-    _startProcessingTimer();
-    _displayText.value = 'Analyzing...';
   }
 
   Future<void> _toggleFlash() async {
@@ -412,10 +464,10 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() => _shouldProcessImage = !_shouldProcessImage);
 
     if (_shouldProcessImage) {
-      _displayText.value = 'Analyzing...';
+      _displayText.value = _kStatusAnalyzing;
       _startProcessingTimer();
     } else {
-      _displayText.value = 'Stopped';
+      _displayText.value = _kStatusStopped;
       _stopProcessingTimer();
       _speech.stop();
     }
@@ -468,6 +520,7 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildBody() {
     if (!_isPermissionGranted) return _buildPermissionDeniedView();
     if (_errorMessage != null) return _buildErrorView();
+    if (_isSwitchingCamera) return _buildLoadingView();
     if (!_isInitialized || _controller == null) return _buildLoadingView();
     return _buildCameraView();
   }
@@ -545,7 +598,11 @@ class _CameraScreenState extends State<CameraScreen>
             if (widget.cameras.length > 1)
               CircleButton(
                 icon: Icons.flip_camera_ios,
-                onTap: () => unawaited(_switchCamera()),
+                onTap: () {
+                  if (_isSwitchingCamera) return;
+                  unawaited(_switchCamera());
+                },
+                color: _isSwitchingCamera ? Colors.white54 : Colors.white,
               )
             else
               const SizedBox(width: 44),
@@ -600,7 +657,7 @@ class _CameraScreenState extends State<CameraScreen>
           const SizedBox(height: 16),
           ValueListenableBuilder<String>(
             valueListenable: _displayText,
-            builder: (_, text, __) =>
+            builder: (_, text, _) =>
                 Text(text, style: const TextStyle(color: Colors.white)),
           ),
         ],

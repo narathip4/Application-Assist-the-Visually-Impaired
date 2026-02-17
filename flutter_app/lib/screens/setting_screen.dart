@@ -110,7 +110,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const SizedBox(height: 6),
                 Text(
                   'Controls how fast the voice speaks.',
-                  style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: Colors.black54,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -145,7 +147,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onPressed: () async {
                     await Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const ModelSettingsScreen()),
+                      MaterialPageRoute(
+                        builder: (_) => const ModelSettingsScreen(),
+                      ),
                     );
                     // In case the model page changed prefs, refresh.
                     await _loadPrefs();

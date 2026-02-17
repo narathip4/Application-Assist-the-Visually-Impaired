@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-// or, if you are using Flutter widgets:
-import 'package:flutter/material.dart';
 
 class DisplayTextBox extends StatelessWidget {
   final ValueListenable<String> textListenable;
@@ -40,6 +38,7 @@ class DisplayTextBox extends StatelessWidget {
           return Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
+              // ignore: deprecated_member_use
               color: Colors.black.withOpacity(0.7),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: borderColor, width: 2),

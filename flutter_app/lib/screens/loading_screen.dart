@@ -67,8 +67,9 @@ class _LoadingScreenState extends State<LoadingScreen>
       // Use fade transition to “match RN” (smooth + consistent feel)
       await Navigator.of(context).pushReplacement(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => CameraScreen(cameras: cams, vlmService: vlm),
-          transitionsBuilder: (_, animation, __, child) {
+          pageBuilder: (_, _, _) =>
+              CameraScreen(cameras: cams, vlmService: vlm),
+          transitionsBuilder: (_, animation, _, child) {
             return FadeTransition(opacity: animation, child: child);
           },
           transitionDuration: const Duration(milliseconds: 200),
@@ -125,11 +126,7 @@ class _LoadingScreenState extends State<LoadingScreen>
         Text(
           _status,
           textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 15,
-            height: 1.3,
-            color: cs.onSurface,
-          ),
+          style: TextStyle(fontSize: 15, height: 1.3, color: cs.onSurface),
         ),
         const SizedBox(height: 16),
         SizedBox(
