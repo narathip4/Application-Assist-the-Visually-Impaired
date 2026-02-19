@@ -10,11 +10,14 @@ class SpeechDecision {
 class SpeechCoordinator {
   final TtsService _tts;
 
-  static const int _criticalStopThrottleMs = 200;
-
   bool _isSpeaking = false;
-  String? _pendingCritical;
-  int _lastCriticalStopAtMs = 0;
+  bool _activeIsCritical = false;
+  String? _activeTextKey;
+  String? _lastCriticalTextKey;
+  int _lastCriticalSpokenAtMs = 0;
+
+  // Suppress repeated critical spam with the same message in a short window.
+  static const int _criticalRepeatSuppressMs = 1200;
 
   // --- Soft-hazard sequence tracking (metadata only; no frame queue) ---
   static const Duration _softEscalationWindow = Duration(milliseconds: 2500);
@@ -532,44 +535,56 @@ class SpeechCoordinator {
     if (text.trim().isEmpty) return;
     if (!ttsEnabled) return;
 
-    // Critical should interrupt current speech (shorter delay for blind users)
-    if (isCritical && _isSpeaking) {
-      _pendingCritical = text; // keep latest only
+    final normalized = _normalizeTextKey(text);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
 
-      final now = DateTime.now().millisecondsSinceEpoch;
-      // Reduced from 400ms to 200ms for faster response.
-      final shouldStopNow = now - _lastCriticalStopAtMs > _criticalStopThrottleMs;
-      if (shouldStopNow) {
-        _lastCriticalStopAtMs = now;
+    // Critical should interrupt current speech immediately.
+    if (isCritical) {
+      final repeatedCritical =
+          _lastCriticalTextKey == normalized &&
+          nowMs - _lastCriticalSpokenAtMs < _criticalRepeatSuppressMs;
+      if (repeatedCritical) return;
+
+      final sameAsActiveCritical =
+          _isSpeaking && _activeIsCritical && _activeTextKey == normalized;
+      if (sameAsActiveCritical) return;
+
+      if (_isSpeaking) {
         await _tts.stop();
         _isSpeaking = false;
       }
-      return;
     }
 
     // Drop non-critical if already speaking
     if (_isSpeaking && !isCritical) return;
 
     _isSpeaking = true;
+    _activeIsCritical = isCritical;
+    _activeTextKey = normalized;
+    if (isCritical) {
+      _lastCriticalTextKey = normalized;
+      _lastCriticalSpokenAtMs = nowMs;
+    }
     try {
       await _tts.speak(text);
     } catch (e) {
       debugPrint('[SpeechCoordinator] TTS error: $e');
     } finally {
       _isSpeaking = false;
-
-      final pending = _pendingCritical;
-      _pendingCritical = null;
-      if (pending != null && ttsEnabled) {
-        await speak(pending, isCritical: true, ttsEnabled: ttsEnabled);
-      }
+      _activeIsCritical = false;
+      _activeTextKey = null;
     }
   }
 
   Future<void> stop() async {
-    _pendingCritical = null;
     _isSpeaking = false;
+    _activeIsCritical = false;
+    _activeTextKey = null;
     await _tts.stop();
+  }
+
+  String _normalizeTextKey(String text) {
+    return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   bool isCriticalMessage(String message) {

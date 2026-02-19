@@ -67,6 +67,7 @@ class _CameraScreenState extends State<CameraScreen>
   CameraImage? _latestFrame;
   int _latestFrameTimestamp = 0;
   int _lastProcessedTimestamp = 0;
+  static const int _maxAcceptableResultLagMs = 2200;
   int _droppedTicks = 0;
 
   static const int _dropTickLogEvery = 20;
@@ -348,8 +349,9 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    if (_latestFrameTimestamp <= _lastProcessedTimestamp) return;
-    _lastProcessedTimestamp = _latestFrameTimestamp;
+    final frameTimestamp = _latestFrameTimestamp;
+    if (frameTimestamp <= _lastProcessedTimestamp) return;
+    _lastProcessedTimestamp = frameTimestamp;
 
     _isProcessingFrame = true;
 
@@ -363,6 +365,14 @@ class _CameraScreenState extends State<CameraScreen>
           DateTime.now().millisecondsSinceEpoch - inferenceStartMs;
       debugPrint('[Inference] latency=${inferenceLatencyMs}ms');
       if (_isDisposed || !_shouldProcessImage) return;
+      final resultLagMs = _latestFrameTimestamp - frameTimestamp;
+      if (resultLagMs > _maxAcceptableResultLagMs) {
+        debugPrint(
+          '[Inference] stale result dropped lag=${resultLagMs}ms '
+          'ts=$frameTimestamp latest=$_latestFrameTimestamp',
+        );
+        return;
+      }
 
       _consecutiveErrors = 0;
 
@@ -386,10 +396,12 @@ class _CameraScreenState extends State<CameraScreen>
       );
       if (!speakDecision.shouldSpeak) return;
 
-      await _speech.speak(
-        speakDecision.text,
-        isCritical: decision.isCritical,
-        ttsEnabled: _isTtsEnabled,
+      unawaited(
+        _speech.speak(
+          speakDecision.text,
+          isCritical: decision.isCritical,
+          ttsEnabled: _isTtsEnabled,
+        ),
       );
     } catch (e) {
       _consecutiveErrors++;

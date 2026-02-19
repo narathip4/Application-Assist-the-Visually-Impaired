@@ -9,7 +9,7 @@ class SpeakPolicy {
   /// Cooldown สำหรับ non-critical
   final Duration cooldown;
 
-  /// กัน critical spam แบบ hard limit (สั้นๆ)
+  /// Optional hard limit for critical spam (set to Duration.zero to disable).
   final Duration criticalMinInterval;
   final Duration repeatedTextWindow;
 
@@ -19,7 +19,7 @@ class SpeakPolicy {
 
   SpeakPolicy({
     required this.cooldown,
-    this.criticalMinInterval = const Duration(milliseconds: 400),
+    this.criticalMinInterval = Duration.zero,
     this.repeatedTextWindow = const Duration(milliseconds: 4500),
   });
 
@@ -33,13 +33,14 @@ class SpeakPolicy {
     final text = description.trim();
     if (text.isEmpty) return SpeakDecision(false, text);
 
-    // Critical bypass cooldown, but enforce a short hard limit
+    // Critical bypasses cooldown entirely.
+    // Optional hard limit can be enabled via criticalMinInterval.
     if (isCritical) {
-      if (now.difference(_lastCriticalAt) < criticalMinInterval) {
+      if (criticalMinInterval > Duration.zero &&
+          now.difference(_lastCriticalAt) < criticalMinInterval) {
         return SpeakDecision(false, text);
       }
       _lastCriticalAt = now;
-      // ไม่อัปเดต _lastSpokenAt เพื่อไม่ให้ critical ไปบล็อก non-critical ต่อ
       return SpeakDecision(true, text);
     }
 
