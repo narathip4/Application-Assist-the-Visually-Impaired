@@ -238,12 +238,12 @@ class _CameraScreenState extends State<CameraScreen>
     _isInitialized = false;
 
     if (old != null) {
-      // Avoid dispose race during engine teardown (can trigger channel-error logs).
-      unawaited(
-        old.dispose().catchError((_) {
-          // Ignore teardown-time platform channel errors.
-        }),
-      );
+      Future.microtask(() async {
+        try {
+          if (old.value.isStreamingImages) await old.stopImageStream();
+          await old.dispose();
+        } catch (_) {}
+      });
     }
 
     _displayText.dispose();
@@ -479,7 +479,6 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  //รวมเฟรม
   Uint8List _buildSequenceInferenceImage(Uint8List currentJpeg) {
     if (!AppConfig.useSequenceInference || AppConfig.sequenceFrameCount <= 1) {
       return currentJpeg;
@@ -893,5 +892,7 @@ class _CameraScreenState extends State<CameraScreen>
 class _SequencePreviewSample {
   final Uint8List jpegBytes;
 
-  const _SequencePreviewSample({required this.jpegBytes});
+  const _SequencePreviewSample({
+    required this.jpegBytes,
+  });
 }

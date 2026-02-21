@@ -24,7 +24,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _subtitle = true;
   double _speechRate = 0.5;
 
-  final List<String> _models = const ['FastVLM 0.5B (Default)'];
+  final List<String> _models = const ['FastVLM 0.5B'];
   late String _selectedModel;
 
   bool _loading = true;
@@ -45,7 +45,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _speech = prefs.getBool(_kSpeechKey) ?? true;
       _subtitle = prefs.getBool(_kSubtitleKey) ?? true;
       _speechRate = prefs.getDouble(_kSpeechRateKey) ?? 0.5;
-      _selectedModel = prefs.getString(_kSelectedModelKey) ?? _models.first;
+      final savedModel = prefs.getString(_kSelectedModelKey);
+      _selectedModel = _models.contains(savedModel)
+          ? savedModel!
+          : _models.first;
       _loading = false;
     });
   }
@@ -111,7 +114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text(
                   'Controls how fast the voice speaks.',
                   style: theme.textTheme.bodySmall?.copyWith(
-                    color: Colors.black54,
+                    color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -162,24 +165,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _modelDropdown(ThemeData theme) {
+    final cs = theme.colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black,
+        color: cs.surface,
+        border: Border.all(color: cs.outline),
         borderRadius: BorderRadius.circular(10),
       ),
       child: DropdownButton<String>(
         value: _selectedModel,
         isExpanded: true,
         underline: const SizedBox(),
-        dropdownColor: Colors.black,
-        iconEnabledColor: Colors.white,
-        style: const TextStyle(color: Colors.white),
+        dropdownColor: cs.surface,
+        iconEnabledColor: cs.onSurface,
+        style: TextStyle(color: cs.onSurface),
         items: _models
             .map(
               (m) => DropdownMenuItem(
                 value: m,
-                child: Text(m, style: const TextStyle(color: Colors.white)),
+                child: Text(m, style: TextStyle(color: cs.onSurface)),
               ),
             )
             .toList(),

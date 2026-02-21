@@ -32,24 +32,18 @@ class FrameInference {
     });
   }
 
-  Future<String> describe(CameraImage img, {required int rotation}) async {
-    final jpegBytes = await yuvToJpeg(img, rotation);
-    return describeJpegBytes(jpegBytes);
-  }
-
-  Future<String> describeJpegBytes(Uint8List jpegBytes) async {
-    return describeJpegBytesWithPrompt(jpegBytes, prompt: AppConfig.prompt);
-  }
-
   Future<String> describeJpegBytesWithPrompt(
     Uint8List jpegBytes, {
     required String prompt,
+    int? maxNewTokens,
+    double? temperature,
   }) async {
     final resp = await vlmService
         .describeJpegBytes(
           jpegBytes,
           prompt: prompt,
-          maxNewTokens: AppConfig.maxNewTokens,
+          maxNewTokens: maxNewTokens ?? AppConfig.maxNewTokens,
+          temperature: temperature,
         )
         .timeout(
           const Duration(seconds: 60),

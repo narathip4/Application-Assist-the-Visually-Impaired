@@ -48,12 +48,15 @@ class FastVlmService {
     Uint8List jpegBytes, {
     required String prompt,
     int maxNewTokens = AppConfig.maxNewTokens,
+    double? temperature,
   }) async {
     final uri = Uri.parse('$_normalizedBase/infer');
 
     final req = http.MultipartRequest('POST', uri)
       ..fields['prompt'] = prompt
       ..fields['max_new_tokens'] = maxNewTokens.toString()
+      ..fields['temperature'] =
+          (temperature ?? 0.5).clamp(0.0, 1.0).toStringAsFixed(2)
       ..files.add(
         http.MultipartFile.fromBytes(
           'image',

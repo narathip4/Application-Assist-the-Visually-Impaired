@@ -138,7 +138,7 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(12),
                     child: Text(
-                      'Note: These values are saved locally. Ensure your VLM service reads these preferences when building the request.',
+                      'These values are applied to VLM requests at runtime.',
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -156,9 +156,14 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
   }
 
   Widget _helperText(String text) {
+    final cs = Theme.of(context).colorScheme;
     return Text(
       text,
-      style: const TextStyle(fontSize: 13, color: Colors.black54, height: 1.3),
+      style: TextStyle(
+        fontSize: 13,
+        color: cs.onSurfaceVariant,
+        height: 1.3,
+      ),
     );
   }
 }
