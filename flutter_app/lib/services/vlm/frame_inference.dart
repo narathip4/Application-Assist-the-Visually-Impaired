@@ -34,18 +34,27 @@ class FrameInference {
 
   Future<String> describe(CameraImage img, {required int rotation}) async {
     final jpegBytes = await yuvToJpeg(img, rotation);
+    return describeJpegBytes(jpegBytes);
+  }
 
+  Future<String> describeJpegBytes(Uint8List jpegBytes) async {
+    return describeJpegBytesWithPrompt(jpegBytes, prompt: AppConfig.prompt);
+  }
+
+  Future<String> describeJpegBytesWithPrompt(
+    Uint8List jpegBytes, {
+    required String prompt,
+  }) async {
     final resp = await vlmService
         .describeJpegBytes(
           jpegBytes,
-          prompt: AppConfig.prompt,
+          prompt: prompt,
           maxNewTokens: AppConfig.maxNewTokens,
         )
         .timeout(
           const Duration(seconds: 60),
           onTimeout: () => throw TimeoutException('VLM request timed out'),
         );
-
     return resp.say;
   }
 }

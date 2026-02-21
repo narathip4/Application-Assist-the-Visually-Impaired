@@ -1,24 +1,25 @@
 // lib/app/config.dart
 class AppConfig {
   static const String appName = 'Assist the Visually Impaired';
-  
+
   // Hugging Face Space base URL
   static const String vlmBaseUrl =
       'https://narathip7-fastvlm-space-test.hf.space';
-  
+
   // VLM parameters
   // maxNewTokens: Limits response length to keep descriptions concise
   // Lower values = faster responses, but may cut off important details
   static const int maxNewTokens = 32;
-  
+
   // Image optimization settings
   // jpegMaxSide: Reduces image size for faster processing while maintaining recognition quality
   // jpegQuality: Balances file size against image clarity (60 is a good compromise)
   static const int jpegMaxSide = 360;
   static const int jpegQuality = 60;
-  
+
   // Prompt for VLM to generate descriptions
-  static const String prompt = '''You are describing a scene to help a visually impaired person navigate indoor spaces and pedestrian walkways.
+  static const String prompt =
+      '''You are describing a scene to help a visually impaired person navigate indoor spaces and pedestrian walkways.
 
 Provide a brief, clear description in one to two sentences. Focus on stationary elements and potential obstacles you can identify with certainty.
 
@@ -46,9 +47,17 @@ Describe what you see now:''';
   // User-facing message shown while processing
   // Changed to better reflect the uncertainty inherent in the process
   static const String fallbackText = 'Processing image...';
-  
+
+  // Sequence inference settings
+  // When enabled, consecutive frames are combined into one VLM input image.
+  static const bool useSequenceInference = true;
+  static const int sequenceFrameCount = 3;
+  static const String sequencePromptPrefix =
+      'These are consecutive frames in time from left to right. '
+      'Use temporal consistency to prioritize hazards that are approaching or entering the path. ';
+
   // Timing configuration
   // inferenceInterval: How often the app captures and processes new images
   // 1200ms (1.2 seconds) balances responsiveness with processing load
-  static const Duration inferenceInterval = Duration(milliseconds: 1200);
+  static const Duration inferenceInterval = Duration(milliseconds: 900);
 }

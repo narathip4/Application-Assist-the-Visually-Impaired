@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'widgets/camera_sight_painter.dart';
 import 'widgets/circle_button.dart';
@@ -18,6 +19,7 @@ import '../services/tts/speech_coordinator.dart';
 
 import '../services/vlm/fast_vlm_service.dart';
 import '../services/vlm/frame_inference.dart';
+import '../utils/sequence_image_utils.dart';
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -65,6 +67,8 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _processingTimer;
 
   CameraImage? _latestFrame;
+  final List<Uint8List> _sequenceFrameBuffer = <Uint8List>[];
+  int _lastSequenceLength = 1;
   int _latestFrameTimestamp = 0;
   int _lastProcessedTimestamp = 0;
   static const int _maxAcceptableResultLagMs = 2200;
@@ -79,10 +83,13 @@ class _CameraScreenState extends State<CameraScreen>
   final ValueNotifier<String> _displayText = ValueNotifier<String>(
     'Initializing...',
   );
+  final ValueNotifier<List<_SequencePreviewSample>> _sequenceSamples =
+      ValueNotifier<List<_SequencePreviewSample>>(const <_SequencePreviewSample>[]);
   String? _errorMessage;
 
   // -------------------- Lifecycle --------------------
   bool _isDisposed = false;
+  bool _didPlayTtsReadyPrompt = false;
   int _streamGen = 0;
   Future<void> _setupChain = Future.value();
 
@@ -93,7 +100,10 @@ class _CameraScreenState extends State<CameraScreen>
 
     _ttsService = TtsService();
     _speech = SpeechCoordinator(tts: _ttsService);
-    _speakPolicy = SpeakPolicy(cooldown: const Duration(seconds: 2));
+    _speakPolicy = SpeakPolicy(
+      cooldown: const Duration(seconds: 2),
+      criticalMinInterval: const Duration(milliseconds: 1500),
+    );
 
     final svc = widget.vlmService;
     if (svc == null) {
@@ -121,6 +131,16 @@ class _CameraScreenState extends State<CameraScreen>
       if (_isDisposed) return;
 
       await _ttsService.refreshSettings();
+      if (_isTtsEnabled && !_didPlayTtsReadyPrompt) {
+        _didPlayTtsReadyPrompt = true;
+        unawaited(
+          _speech.speak(
+            'ระบบเสียงพร้อมใช้งาน',
+            isCritical: true,
+            ttsEnabled: true,
+          ),
+        );
+      }
 
       if (_isPermissionGranted && widget.cameras.isNotEmpty) {
         await _ensureCameraInitialized(_currentCameraIndex);
@@ -136,6 +156,10 @@ class _CameraScreenState extends State<CameraScreen>
     if (_isDisposed) return;
 
     _isTtsEnabled = prefs.getBool(_kSpeechKey) ?? true;
+    if (!_isTtsEnabled) {
+      _isTtsEnabled = true;
+      await prefs.setBool(_kSpeechKey, true);
+    }
     _subtitleEnabled = prefs.getBool(_kSubtitleKey) ?? true;
   }
 
@@ -192,6 +216,8 @@ class _CameraScreenState extends State<CameraScreen>
     _stopProcessingTimer();
     _speech.stop();
     _ttsService.dispose();
+    _sequenceFrameBuffer.clear();
+    _lastSequenceLength = 1;
 
     final old = _controller;
     _controller = null;
@@ -207,6 +233,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     _displayText.dispose();
+    _sequenceSamples.dispose();
     super.dispose();
   }
 
@@ -300,6 +327,8 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (_) {}
 
     _latestFrame = null;
+    _sequenceFrameBuffer.clear();
+    _lastSequenceLength = 1;
   }
 
   Future<void> _waitForOngoingFrameProcessing() async {
@@ -358,9 +387,17 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       final img = _latestFrame!;
       final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
+      final jpegBytes = await _inference.yuvToJpeg(img, rotation);
+      final inferenceImageBytes = _buildSequenceInferenceImage(jpegBytes);
+      final prompt = _lastSequenceLength > 1
+          ? '${AppConfig.sequencePromptPrefix}${AppConfig.prompt}'
+          : AppConfig.prompt;
 
       final inferenceStartMs = DateTime.now().millisecondsSinceEpoch;
-      final sayRaw = await _inference.describe(img, rotation: rotation);
+      final sayRaw = await _inference.describeJpegBytesWithPrompt(
+        inferenceImageBytes,
+        prompt: prompt,
+      );
       final inferenceLatencyMs =
           DateTime.now().millisecondsSinceEpoch - inferenceStartMs;
       debugPrint('[Inference] latency=${inferenceLatencyMs}ms');
@@ -383,16 +420,37 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       _displayText.value = say;
-
-      if (!_isTtsEnabled) return;
+      if (!_isTtsEnabled) {
+        _pushSequenceSample(
+          jpegBytes: inferenceImageBytes,
+          label: 'TTS OFF',
+          isCritical: false,
+          allowSpeak: false,
+        );
+        return;
+      }
 
       final decision = _speech.evaluate(say);
+      debugPrint(
+        '[TTS_GATE] decision allow=${decision.allowSpeak} critical=${decision.isCritical} text="$say"',
+      );
+      _pushSequenceSample(
+        jpegBytes: inferenceImageBytes,
+        label: decision.isCritical
+            ? 'CRITICAL'
+            : (decision.allowSpeak ? 'SPEAK' : 'HOLD'),
+        isCritical: decision.isCritical,
+        allowSpeak: decision.allowSpeak,
+      );
 
       if (!decision.allowSpeak) return;
 
       final speakDecision = _speakPolicy.decide(
         description: say,
         isCritical: decision.isCritical,
+      );
+      debugPrint(
+        '[TTS_GATE] policy shouldSpeak=${speakDecision.shouldSpeak} critical=${decision.isCritical} text="${speakDecision.text}"',
       );
       if (!speakDecision.shouldSpeak) return;
 
@@ -415,6 +473,29 @@ class _CameraScreenState extends State<CameraScreen>
     } finally {
       _isProcessingFrame = false;
     }
+  }
+
+  Uint8List _buildSequenceInferenceImage(Uint8List currentJpeg) {
+    if (!AppConfig.useSequenceInference || AppConfig.sequenceFrameCount <= 1) {
+      _lastSequenceLength = 1;
+      return currentJpeg;
+    }
+
+    _sequenceFrameBuffer.add(currentJpeg);
+    final maxFrames = AppConfig.sequenceFrameCount;
+    if (_sequenceFrameBuffer.length > maxFrames) {
+      _sequenceFrameBuffer.removeRange(
+        0,
+        _sequenceFrameBuffer.length - maxFrames,
+      );
+    }
+    _lastSequenceLength = _sequenceFrameBuffer.length;
+
+    final combined = SequenceImageUtils.composeHorizontalStrip(
+      _sequenceFrameBuffer,
+    );
+    if (combined.isEmpty) return currentJpeg;
+    return combined;
   }
 
   void _countDroppedTick() {
@@ -468,6 +549,18 @@ class _CameraScreenState extends State<CameraScreen>
     await controller.setFlashMode(newMode);
     if (!mounted || _isDisposed) return;
     setState(() => _desiredFlashMode = newMode);
+  }
+
+  Future<void> _testTts() async {
+    try {
+      await _ttsService.speak('ทดสอบเสียง ระบบพร้อมใช้งาน');
+      if (!mounted || _isDisposed) return;
+      _displayText.value = 'TTS test played';
+    } catch (e) {
+      debugPrint('[TTS_TEST] error: $e');
+      if (!mounted || _isDisposed) return;
+      _displayText.value = 'TTS test failed: $e';
+    }
   }
 
   void _toggleProcessing() {
@@ -565,9 +658,123 @@ class _CameraScreenState extends State<CameraScreen>
           isCritical: _speech.isCriticalMessage,
           subtitleEnabled: _subtitleEnabled,
         ),
+        _buildSequencePreviewStrip(),
         _buildBottomControls(),
       ],
     );
+  }
+
+  Widget _buildSequencePreviewStrip() {
+    return Positioned(
+      top: 84,
+      left: 12,
+      right: 12,
+      child: IgnorePointer(
+        child: ValueListenableBuilder<List<_SequencePreviewSample>>(
+          valueListenable: _sequenceSamples,
+          builder: (_, samples, __) {
+            return Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.66),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Sequence Input Preview',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  if (samples.isEmpty)
+                    const Text(
+                      'Waiting for samples...',
+                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                    )
+                  else
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: samples
+                            .map((s) => _buildSequencePreviewCard(s))
+                            .toList(),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSequencePreviewCard(_SequencePreviewSample sample) {
+    final borderColor = sample.isCritical
+        ? Colors.redAccent
+        : (sample.allowSpeak ? Colors.greenAccent : Colors.orangeAccent);
+
+    return Container(
+      width: 76,
+      margin: const EdgeInsets.only(right: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: borderColor, width: 1.5),
+              image: DecorationImage(
+                image: MemoryImage(sample.jpegBytes),
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            sample.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: borderColor,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _pushSequenceSample({
+    required Uint8List jpegBytes,
+    required String label,
+    required bool isCritical,
+    required bool allowSpeak,
+  }) {
+    final next = <_SequencePreviewSample>[
+      ..._sequenceSamples.value,
+      _SequencePreviewSample(
+        jpegBytes: jpegBytes,
+        label: label,
+        isCritical: isCritical,
+        allowSpeak: allowSpeak,
+      ),
+    ];
+    if (next.length > 4) {
+      next.removeRange(0, next.length - 4);
+    }
+
+    _sequenceSamples.value = next;
   }
 
   Widget _buildTopControls() {
@@ -582,14 +789,24 @@ class _CameraScreenState extends State<CameraScreen>
             icon: Icons.settings,
             onTap: () => unawaited(_openSettings()),
           ),
-          CircleButton(
-            icon: _desiredFlashMode == FlashMode.torch
-                ? Icons.flash_on
-                : Icons.flash_off,
-            onTap: () => unawaited(_toggleFlash()),
-            color: _desiredFlashMode == FlashMode.torch
-                ? Colors.yellow
-                : Colors.white,
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircleButton(
+                icon: Icons.record_voice_over,
+                onTap: () => unawaited(_testTts()),
+              ),
+              const SizedBox(width: 10),
+              CircleButton(
+                icon: _desiredFlashMode == FlashMode.torch
+                    ? Icons.flash_on
+                    : Icons.flash_off,
+                onTap: () => unawaited(_toggleFlash()),
+                color: _desiredFlashMode == FlashMode.torch
+                    ? Colors.yellow
+                    : Colors.white,
+              ),
+            ],
           ),
         ],
       ),
@@ -726,4 +943,18 @@ class _CameraScreenState extends State<CameraScreen>
       ),
     );
   }
+}
+
+class _SequencePreviewSample {
+  final Uint8List jpegBytes;
+  final String label;
+  final bool isCritical;
+  final bool allowSpeak;
+
+  const _SequencePreviewSample({
+    required this.jpegBytes,
+    required this.label,
+    required this.isCritical,
+    required this.allowSpeak,
+  });
 }

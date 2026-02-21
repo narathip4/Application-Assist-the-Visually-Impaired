@@ -104,8 +104,8 @@ void main() {
       expect(first.allowSpeak, isFalse);
       expect(second.allowSpeak, isTrue);
 
-      // Soft sequence window is 2.5s; after this window persistence should reset.
-      await Future<void>.delayed(const Duration(milliseconds: 2600));
+      // Soft sequence window is 3.8s; after this window persistence should reset.
+      await Future<void>.delayed(const Duration(milliseconds: 3900));
       final afterWindow = coordinator.evaluate('person on the left');
       expect(afterWindow.allowSpeak, isFalse);
     });
