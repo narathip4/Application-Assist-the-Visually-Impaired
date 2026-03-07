@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -33,20 +32,23 @@ class FrameInference {
     });
   }
 
-  Future<String> describe(CameraImage img, {required int rotation}) async {
-    final jpegBytes = await yuvToJpeg(img, rotation);
-
+  Future<String> describeJpegBytesWithPrompt(
+    Uint8List jpegBytes, {
+    required String prompt,
+    int? maxNewTokens,
+    double? temperature,
+  }) async {
     final resp = await vlmService
         .describeJpegBytes(
           jpegBytes,
-          prompt: AppConfig.prompt,
-          maxNewTokens: AppConfig.maxNewTokens,
+          prompt: prompt,
+          maxNewTokens: maxNewTokens ?? AppConfig.maxNewTokens,
+          temperature: temperature,
         )
         .timeout(
           const Duration(seconds: 60),
           onTimeout: () => throw TimeoutException('VLM request timed out'),
         );
-
     return resp.say;
   }
 }

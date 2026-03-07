@@ -3,13 +3,11 @@ import 'package:flutter/foundation.dart';
 
 class DisplayTextBox extends StatelessWidget {
   final ValueListenable<String> textListenable;
-  final bool Function(String) isCritical;
   final bool subtitleEnabled;
 
   const DisplayTextBox({
     super.key,
     required this.textListenable,
-    required this.isCritical,
     required this.subtitleEnabled,
   });
 
@@ -24,33 +22,26 @@ class DisplayTextBox extends StatelessWidget {
       child: ValueListenableBuilder<String>(
         valueListenable: textListenable,
         builder: (context, text, child) {
-          Color borderColor = Colors.white24;
-
-          if (isCritical(text)) {
-            borderColor = Colors.red;
-          } else {
-            final lower = text.toLowerCase();
-            if (lower.contains('unclear') || lower.contains('difficult')) {
-              borderColor = Colors.orange;
-            }
-          }
-
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              // ignore: deprecated_member_use
-              color: Colors.black.withOpacity(0.7),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: borderColor, width: 2),
-            ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                height: 1.4,
+          return Semantics(
+            liveRegion: true,
+            label: 'สถานะการมองเห็น',
+            value: text,
+            child: Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white24, width: 1.5),
               ),
-              textAlign: TextAlign.center,
+              child: Text(
+                text,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  height: 1.4,
+                ),
+                textAlign: TextAlign.center,
+              ),
             ),
           );
         },

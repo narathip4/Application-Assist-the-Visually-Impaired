@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'model_setting_screen.dart';
-
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -15,24 +13,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const String _kVibrationKey = 'ui.vibration';
   static const String _kSpeechKey = 'ui.speech';
   static const String _kSubtitleKey = 'ui.subtitle';
+  static const String _kTranslateToThaiKey = 'ui.translateToThai';
   static const String _kSpeechRateKey = 'tts.speechRate';
-  static const String _kSelectedModelKey = 'model.selected';
 
   // Defaults
   bool _vibration = true;
   bool _speech = true;
   bool _subtitle = true;
+  bool _translateToThai = true;
   double _speechRate = 0.5;
-
-  final List<String> _models = const ['FastVLM 0.5B (Default)'];
-  late String _selectedModel;
 
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _selectedModel = _models.first;
     _loadPrefs();
   }
 
@@ -44,8 +39,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _vibration = prefs.getBool(_kVibrationKey) ?? true;
       _speech = prefs.getBool(_kSpeechKey) ?? true;
       _subtitle = prefs.getBool(_kSubtitleKey) ?? true;
+      _translateToThai = prefs.getBool(_kTranslateToThaiKey) ?? true;
       _speechRate = prefs.getDouble(_kSpeechRateKey) ?? 0.5;
-      _selectedModel = prefs.getString(_kSelectedModelKey) ?? _models.first;
       _loading = false;
     });
   }
@@ -55,8 +50,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setBool(_kVibrationKey, _vibration);
     await prefs.setBool(_kSpeechKey, _speech);
     await prefs.setBool(_kSubtitleKey, _subtitle);
+    await prefs.setBool(_kTranslateToThaiKey, _translateToThai);
     await prefs.setDouble(_kSpeechRateKey, _speechRate);
-    await prefs.setString(_kSelectedModelKey, _selectedModel);
   }
 
   @override
@@ -69,18 +64,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       appBar: AppBar(
         backgroundColor: bg,
         elevation: 0,
-        title: const Text('Settings'),
+        title: const Text('การตั้งค่า'),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                _sectionTitle('Alert Settings'),
+                _sectionTitle('การแจ้งเตือน'),
                 const SizedBox(height: 8),
                 _switchTile(
-                  title: 'Vibration',
-                  subtitle: 'Vibrate when an alert is spoken.',
+                  title: 'การสั่น',
+                  subtitle: 'สั่นเมื่อมีการแจ้งเตือนด้วยเสียง',
                   value: _vibration,
                   onChanged: (v) async {
                     setState(() => _vibration = v);
@@ -88,8 +83,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
                 _switchTile(
-                  title: 'Speech',
-                  subtitle: 'Enable text-to-speech output.',
+                  title: 'เสียงพูด',
+                  subtitle: 'เปิดการอ่านข้อความด้วยเสียง',
                   value: _speech,
                   onChanged: (v) async {
                     setState(() => _speech = v);
@@ -97,21 +92,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
                 _switchTile(
-                  title: 'Subtitle',
-                  subtitle: 'Show on-screen text overlay.',
+                  title: 'คำบรรยาย',
+                  subtitle: 'แสดงข้อความบนหน้าจอ',
                   value: _subtitle,
                   onChanged: (v) async {
                     setState(() => _subtitle = v);
                     await _savePrefs();
                   },
                 ),
+                _switchTile(
+                  title: 'แปลผลลัพธ์เป็นภาษาไทย',
+                  subtitle: 'แปลคำอธิบายภาษาอังกฤษจาก AI เป็นภาษาไทยก่อนพูด',
+                  value: _translateToThai,
+                  onChanged: (v) async {
+                    setState(() => _translateToThai = v);
+                    await _savePrefs();
+                  },
+                ),
                 const SizedBox(height: 20),
-                _sectionTitle('Speech Rate'),
+                _sectionTitle('ความเร็วเสียงพูด'),
                 const SizedBox(height: 6),
                 Text(
-                  'Controls how fast the voice speaks.',
+                  'ปรับความเร็วในการอ่านออกเสียง',
                   style: theme.textTheme.bodySmall?.copyWith(
-                    color: Colors.black54,
+                    color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -139,56 +143,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
-                _sectionTitle('Model'),
-                const SizedBox(height: 8),
-                _modelDropdown(theme),
-                const SizedBox(height: 12),
-                FilledButton(
-                  onPressed: () async {
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const ModelSettingsScreen(),
-                      ),
-                    );
-                    // In case the model page changed prefs, refresh.
-                    await _loadPrefs();
-                  },
-                  child: const Text('Model Settings'),
+                Text(
+                  'โหมดความปลอดภัยถูกตั้งเป็นค่าเริ่มต้นตลอดเวลา',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
-    );
-  }
-
-  Widget _modelDropdown(ThemeData theme) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: DropdownButton<String>(
-        value: _selectedModel,
-        isExpanded: true,
-        underline: const SizedBox(),
-        dropdownColor: Colors.black,
-        iconEnabledColor: Colors.white,
-        style: const TextStyle(color: Colors.white),
-        items: _models
-            .map(
-              (m) => DropdownMenuItem(
-                value: m,
-                child: Text(m, style: const TextStyle(color: Colors.white)),
-              ),
-            )
-            .toList(),
-        onChanged: (v) async {
-          if (v == null) return;
-          setState(() => _selectedModel = v);
-          await _savePrefs();
-        },
-      ),
     );
   }
 

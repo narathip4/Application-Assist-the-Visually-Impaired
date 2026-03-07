@@ -63,11 +63,11 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
       appBar: AppBar(
         backgroundColor: bg,
         elevation: 0,
-        title: const Text('Model Settings'),
+        title: const Text('ตั้งค่าโมเดล'),
         actions: [
           TextButton(
             onPressed: _loading ? null : _resetDefaults,
-            child: const Text('Reset'),
+            child: const Text('รีเซ็ต'),
           ),
         ],
       ),
@@ -76,9 +76,9 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                _sectionTitle('Temperature'),
+                _sectionTitle('อุณหภูมิ'),
                 _helperText(
-                  'Higher = more creative (can be less stable). Lower = more consistent.',
+                  'ค่าสูง = คำตอบหลากหลายขึ้น (อาจไม่นิ่ง) ค่าต่ำ = คำตอบสม่ำเสมอขึ้น',
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -105,9 +105,9 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
-                _sectionTitle('Max Tokens'),
+                _sectionTitle('จำนวนโทเค็นสูงสุด'),
                 _helperText(
-                  'Higher = longer explanations (slower). Lower = shorter responses (can cut sentences).',
+                  'ค่าสูง = คำอธิบายยาวขึ้น (ช้าลง) ค่าต่ำ = คำตอบสั้นลง (อาจตัดประโยค)',
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -138,7 +138,7 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(12),
                     child: Text(
-                      'Note: These values are saved locally. Ensure your VLM service reads these preferences when building the request.',
+                      'ค่าพวกนี้จะถูกใช้กับคำขอ VLM ระหว่างการทำงาน',
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -156,9 +156,14 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
   }
 
   Widget _helperText(String text) {
+    final cs = Theme.of(context).colorScheme;
     return Text(
       text,
-      style: const TextStyle(fontSize: 13, color: Colors.black54, height: 1.3),
+      style: TextStyle(
+        fontSize: 13,
+        color: cs.onSurfaceVariant,
+        height: 1.3,
+      ),
     );
   }
 }

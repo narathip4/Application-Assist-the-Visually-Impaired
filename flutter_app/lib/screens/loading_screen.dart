@@ -18,7 +18,7 @@ class _LoadingScreenState extends State<LoadingScreen>
   late final AnimationController _controller;
   late final Animation<double> _pulse;
 
-  String _status = 'Preparing application...';
+  String _status = 'กำลังเตรียมแอปพลิเคชัน...';
   String? _error;
   bool _bootstrapping = false;
 
@@ -44,7 +44,7 @@ class _LoadingScreenState extends State<LoadingScreen>
       if (!mounted) return;
       setState(() {
         _error = null;
-        _status = 'Initializing vision model...';
+        _status = 'กำลังเริ่มต้นโมเดลการมองเห็น...';
       });
 
       final vlm = FastVlmService(
@@ -53,13 +53,13 @@ class _LoadingScreenState extends State<LoadingScreen>
       );
 
       // Warm-up (kept as-is; safe even if no-op)
-      setState(() => _status = 'Warming up model...');
+      setState(() => _status = 'กำลังวอร์มอัปโมเดล...');
       await vlm.ensureInitialized();
 
-      setState(() => _status = 'Detecting cameras...');
+      setState(() => _status = 'กำลังตรวจหากล้อง...');
       final cams = await availableCameras();
       if (cams.isEmpty) {
-        throw StateError('No camera detected on device');
+        throw StateError('ไม่พบกล้องบนอุปกรณ์');
       }
 
       if (!mounted) return;
@@ -136,7 +136,7 @@ class _LoadingScreenState extends State<LoadingScreen>
         ),
         const SizedBox(height: 10),
         Text(
-          'Please keep the app open',
+          'กรุณาเปิดแอปค้างไว้',
           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
         ),
       ],
@@ -144,7 +144,7 @@ class _LoadingScreenState extends State<LoadingScreen>
   }
 
   Widget _buildError(ColorScheme cs) {
-    final msg = _error ?? 'Unknown error';
+    final msg = _error ?? 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
     return Column(
       key: const ValueKey('error'),
       mainAxisSize: MainAxisSize.min,
@@ -152,7 +152,7 @@ class _LoadingScreenState extends State<LoadingScreen>
         Icon(Icons.error_outline, size: 64, color: cs.error),
         const SizedBox(height: 12),
         Text(
-          'Initialization failed',
+          'เริ่มต้นระบบไม่สำเร็จ',
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w600,
@@ -173,14 +173,14 @@ class _LoadingScreenState extends State<LoadingScreen>
           children: [
             OutlinedButton(
               onPressed: () => SystemNavigator.pop(),
-              child: const Text('Exit'),
+              child: const Text('ออกจากแอป'),
             ),
             FilledButton(
               onPressed: () {
                 setState(() => _error = null);
                 _bootstrap();
               },
-              child: const Text('Retry'),
+              child: const Text('ลองใหม่'),
             ),
           ],
         ),

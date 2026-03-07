@@ -1,54 +1,62 @@
 // lib/app/config.dart
 class AppConfig {
-  static const String appName = 'Assist the Visually Impaired';
-  
+  static const String appName = 'ผู้ช่วยการมองเห็น';
+
   // Hugging Face Space base URL
   static const String vlmBaseUrl =
       'https://narathip7-fastvlm-space-test.hf.space';
-  
+
   // VLM parameters
   // maxNewTokens: Limits response length to keep descriptions concise
   // Lower values = faster responses, but may cut off important details
   static const int maxNewTokens = 32;
-  
+
   // Image optimization settings
   // jpegMaxSide: Reduces image size for faster processing while maintaining recognition quality
   // jpegQuality: Balances file size against image clarity (60 is a good compromise)
   static const int jpegMaxSide = 360;
   static const int jpegQuality = 60;
-  
-  // Prompt for VLM to generate descriptions
-  static const String prompt = '''You are describing a scene to help a visually impaired person navigate indoor spaces and pedestrian walkways.
 
-Provide a brief, clear description in one to two sentences. Focus on stationary elements and potential obstacles you can identify with certainty.
+  // Single default safety prompt (used in all inference runs).
+  // Keep one concise sentence for clear TTS playback.
+  static const String safetyPrompt = '''
+You are a real-time safety assistant for a visually impaired user.
 
-What to describe:
-- Objects and obstacles in the field of view, especially at chest or head height where a cane might not detect them, such as poles, signs, overhanging branches, or furniture
-- Architectural features like doors, walls, stairs, ramps, or level changes
-- Floor surfaces and any visible hazards like wet floor signs, uneven surfaces, or objects on the ground
-- Tactile paving, accessible pathway markings, or other accessibility features
-- People or objects that appear to be in or near the walking path
+Return exactly ONE short spoken sentence (8-16 words).
+Focus only on immediate walking safety.
 
-How to describe:
-- Use clear spatial terms such as "directly ahead," "to your left," "on the right side," or "at the center of view"
-- Describe what you see without claiming to know exact distances in meters or feet
-- For potential obstacles, describe what they are and their approximate position, such as "a pole appears in the center of your path" or "stairs descending ahead"
-- Use simple, direct language that focuses on what is observable in the image
+Rules:
+- Mention only the highest-risk object or hazard.
+- Include one position word: ahead, left, right, or center.
+- Include movement if visible: approaching, crossing, or stationary.
+- Use "Careful," for hazards.
+- Use neutral wording if no immediate hazard.
+- No distances or measurements.
+- No extra explanation.
+- No chatbot/polite phrases (never say: "I hope this helps", "let me know", "anything else").
+- Output one sentence only.
 
-Safety boundaries:
-- Do NOT make claims about whether something is safe to approach or how far away it is in specific measurements
-- Do NOT analyze traffic situations, moving vehicles, or road crossings because this system is not designed for those environments
-- If the lighting is poor or the image is unclear, state honestly: "The image quality is insufficient for reliable description"
-- If you detect what appears to be a road or traffic area, state: "This appears to be a traffic area where this system should not be used"
+Special cases:
+- If unclear: "Image unclear, please scan again."
+- If dark: "Image too dark, please move to a brighter area."
+- If traffic: "Careful, traffic area detected, stop and reorient."
 
-Describe what you see now:''';
+Examples:
+- "Careful, a man in a white shirt is walking ahead toward you."
+- "Careful, a white dog is ahead and getting closer."
+- "A walking path is ahead with glass panels on the side."
+''';
 
   // User-facing message shown while processing
   // Changed to better reflect the uncertainty inherent in the process
-  static const String fallbackText = 'Processing image...';
-  
+  static const String fallbackText = 'กำลังประมวลผลภาพ...';
+
+  // Sequence inference settings
+  // When enabled, consecutive frames are combined into one VLM input image.
+  static const bool useSequenceInference = true;
+  static const int sequenceFrameCount = 3;
   // Timing configuration
   // inferenceInterval: How often the app captures and processes new images
   // 1200ms (1.2 seconds) balances responsiveness with processing load
-  static const Duration inferenceInterval = Duration(milliseconds: 1200);
+  static const Duration inferenceInterval = Duration(milliseconds: 900);
 }

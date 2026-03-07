@@ -14,8 +14,16 @@ class TtsService {
   Future<void> init() async {
     if (_initialized) return;
 
-    await _tts.setLanguage('th-TH'); // หรือ en-US ตามระบบ
+    await _tts.awaitSpeakCompletion(true);
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+    await _configureLanguage();
     await _applySpeechRateFromPrefs();
+
+    _tts.setStartHandler(() {
+      // ignore: avoid_print
+      print('[TTS] start');
+    });
 
     _tts.setCompletionHandler(() {
       _speakCompleter?.complete();
@@ -28,6 +36,15 @@ class TtsService {
     });
 
     _initialized = true;
+  }
+
+  Future<void> _configureLanguage() async {
+    final thResult = await _tts.setLanguage('th-TH');
+    final ok = thResult == 1 || thResult == true;
+    if (!ok) {
+      // Fallback when Thai voice pack is missing on device/emulator.
+      await _tts.setLanguage('en-US');
+    }
   }
 
   Future<void> _applySpeechRateFromPrefs() async {
@@ -51,9 +68,12 @@ class TtsService {
     await stop(); // ensure no overlap
 
     _speakCompleter = Completer<void>();
+    final speakFuture = _speakCompleter!.future;
+    // ignore: avoid_print
+    print('[TTS] speak="$text"');
     await _tts.speak(text);
 
-    return _speakCompleter!.future;
+    return speakFuture;
   }
 
   Future<void> stop() async {
