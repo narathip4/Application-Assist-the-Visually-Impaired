@@ -17,6 +17,8 @@ import '../services/tts/speak_policy.dart';
 import '../services/tts/tts_service.dart';
 import '../services/tts/speech_coordinator.dart';
 
+import '../services/translation/google_translate_service.dart';
+import '../services/translation/translate_description_use_case.dart';
 import '../services/vlm/fast_vlm_service.dart';
 import '../services/vlm/frame_inference.dart';
 import '../utils/sequence_image_utils.dart';
@@ -37,13 +39,15 @@ class _CameraScreenState extends State<CameraScreen>
   static const String _kSpeechKey = 'ui.speech';
   static const String _kSubtitleKey = 'ui.subtitle';
   static const String _kVibrationKey = 'ui.vibration';
-  static const String _kSelectedModelKey = 'model.selected';
+  static const String _kTranslateToThaiKey = 'ui.translateToThai';
   static const String _kMaxTokensKey = 'model.maxTokens';
   static const String _kTemperatureKey = 'model.temperature';
   static const int _kDefaultMaxTokens = 32;
   static const double _kDefaultTemperature = 0.5;
-  static const String _kStatusAnalyzing = 'Analyzing...';
-  static const String _kStatusStopped = 'Stopped';
+  static const String _kStatusAnalyzing = 'กำลังวิเคราะห์...';
+  static const String _kStatusStopped = 'หยุดการวิเคราะห์แล้ว';
+  static const double _kBlindControlSize = 58;
+  static const double _kBlindIconSize = 30;
 
   // -------------------- Camera --------------------
   CameraController? _controller;
@@ -56,6 +60,7 @@ class _CameraScreenState extends State<CameraScreen>
   // -------------------- VLM --------------------
   late final FastVlmService _vlmService;
   late final FrameInference _inference;
+  late final TranslateDescriptionUseCase _translateDescription;
   bool _isModelReady = false;
 
   // -------------------- TTS --------------------
@@ -66,7 +71,7 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isTtsEnabled = true;
   bool _subtitleEnabled = true;
   bool _isVibrationEnabled = true;
-  String _selectedModel = 'FastVLM 0.5B (Safety)';
+  bool _translateToThai = true;
   int _maxTokens = _kDefaultMaxTokens;
   double _temperature = _kDefaultTemperature;
 
@@ -81,16 +86,19 @@ class _CameraScreenState extends State<CameraScreen>
   int _latestFrameTimestamp = 0;
   int _lastProcessedTimestamp = 0;
   static const int _maxAcceptableResultLagMs = 2200;
+  static const int _sameSceneCooldownMs = 7000;
   int _droppedTicks = 0;
 
   static const int _dropTickLogEvery = 20;
 
   int _consecutiveErrors = 0;
   static const int _maxConsecutiveErrors = 3;
+  String? _lastSpokenOrShownDescription;
+  int _lastSpokenOrShownAtMs = 0;
 
   // -------------------- UI --------------------
   final ValueNotifier<String> _displayText = ValueNotifier<String>(
-    'Initializing...',
+    'กำลังเริ่มต้นระบบ...',
   );
   final ValueNotifier<List<_SequencePreviewSample>> _sequenceSamples =
       ValueNotifier<List<_SequencePreviewSample>>(
@@ -101,6 +109,7 @@ class _CameraScreenState extends State<CameraScreen>
   // -------------------- Lifecycle --------------------
   bool _isDisposed = false;
   bool _didPlayTtsReadyPrompt = false;
+  bool _didPlayControlHintPrompt = false;
   int _streamGen = 0;
   Future<void> _setupChain = Future.value();
 
@@ -112,18 +121,21 @@ class _CameraScreenState extends State<CameraScreen>
     _ttsService = TtsService();
     _speech = SpeechCoordinator(tts: _ttsService);
     _speakPolicy = SpeakPolicy(
-      cooldown: const Duration(seconds: 2),
+      cooldown: const Duration(seconds: 5),
       criticalMinInterval: const Duration(milliseconds: 1500),
     );
 
     final svc = widget.vlmService;
     if (svc == null) {
-      _setError('VLM service not provided');
+      _setError('ไม่ได้ตั้งค่าบริการโมเดลการมองเห็น');
       return;
     }
 
     _vlmService = svc;
     _inference = FrameInference(vlmService: _vlmService);
+    _translateDescription = TranslateDescriptionUseCase(
+      translator: GoogleTranslateService(timeout: const Duration(seconds: 5)),
+    );
 
     _initializeApp();
   }
@@ -152,13 +164,23 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         );
       }
+      if (_isTtsEnabled && !_didPlayControlHintPrompt) {
+        _didPlayControlHintPrompt = true;
+        unawaited(
+          _speech.speak(
+            'แตะปุ่มกลางเพื่อเริ่มหรือหยุดการวิเคราะห์ ปุ่มซ้ายล่างเปิดปิดเสียงพูด',
+            isCritical: false,
+            ttsEnabled: true,
+          ),
+        );
+      }
 
       if (_isPermissionGranted && widget.cameras.isNotEmpty) {
         await _ensureCameraInitialized(_currentCameraIndex);
       }
     } catch (e) {
       debugPrint('[CameraScreen] Init error: $e');
-      _setError('Failed to initialize app');
+      _setError('เริ่มต้นแอปไม่สำเร็จ');
     }
   }
 
@@ -173,7 +195,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
     _subtitleEnabled = prefs.getBool(_kSubtitleKey) ?? true;
     _isVibrationEnabled = prefs.getBool(_kVibrationKey) ?? true;
-    _selectedModel = prefs.getString(_kSelectedModelKey) ?? _selectedModel;
+    _translateToThai = prefs.getBool(_kTranslateToThaiKey) ?? true;
     _maxTokens = prefs.getInt(_kMaxTokensKey) ?? _kDefaultMaxTokens;
     _temperature = prefs.getDouble(_kTemperatureKey) ?? _kDefaultTemperature;
   }
@@ -185,12 +207,12 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() => _isPermissionGranted = status == PermissionStatus.granted);
 
     if (!_isPermissionGranted) {
-      _setError('Camera permission denied');
+      _setError('ไม่ได้รับอนุญาตให้ใช้กล้อง');
     }
   }
 
   Future<void> _warmUpModel() async {
-    _displayText.value = 'Loading AI model...';
+    _displayText.value = 'กำลังโหลดโมเดล AI...';
     try {
       await _vlmService.ensureInitialized();
       if (!mounted || _isDisposed) return;
@@ -200,7 +222,7 @@ class _CameraScreenState extends State<CameraScreen>
           : _kStatusStopped;
     } catch (e) {
       debugPrint('[CameraScreen] Model warmup error: $e');
-      _setError('AI model failed to load');
+      _setError('โหลดโมเดล AI ไม่สำเร็จ');
     }
   }
 
@@ -231,6 +253,7 @@ class _CameraScreenState extends State<CameraScreen>
     _stopProcessingTimer();
     _speech.stop();
     _ttsService.dispose();
+    _translateDescription.dispose();
     _sequenceFrameBuffer.clear();
 
     final old = _controller;
@@ -313,7 +336,7 @@ class _CameraScreenState extends State<CameraScreen>
           : _kStatusStopped;
     } catch (e) {
       debugPrint('[CameraScreen] Camera setup error: $e');
-      _setError('Camera initialization failed');
+      _setError('เริ่มต้นกล้องไม่สำเร็จ');
     }
   }
 
@@ -402,9 +425,7 @@ class _CameraScreenState extends State<CameraScreen>
       final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
       final jpegBytes = await _inference.yuvToJpeg(img, rotation);
       final inferenceImageBytes = _buildSequenceInferenceImage(jpegBytes);
-      final prompt = _selectedModel.toLowerCase().contains('safety')
-          ? AppConfig.sequenceHazardPrompt
-          : AppConfig.prompt;
+      const prompt = AppConfig.safetyPrompt;
 
       final inferenceStartMs = DateTime.now().millisecondsSinceEpoch;
       final sayRaw = await _inference.describeJpegBytesWithPrompt(
@@ -428,11 +449,35 @@ class _CameraScreenState extends State<CameraScreen>
 
       _consecutiveErrors = 0;
 
-      final say = sayRaw.trim();
+      final rawSelected = _selectPriorityCandidateFromRaw(sayRaw);
+      final translated = await _translateDescription.execute(
+        rawSelected.message,
+        enabled: _translateToThai,
+      );
+      final cleanedTranslated = _cleanFinalOutputSentence(translated);
+      if (cleanedTranslated.isEmpty) {
+        _displayText.value = AppConfig.fallbackText;
+        return;
+      }
+
+      final tagged = _extractTaggedPriority(cleanedTranslated);
+      final say = tagged.message;
       if (say.isEmpty) {
         _displayText.value = AppConfig.fallbackText;
         return;
       }
+
+      final decision = _speech.evaluate(say);
+      // Do not trust raw pre-translation tags because models may echo prompt
+      // examples/instructions with misleading [CRITICAL] labels.
+      final effectivePriority = tagged.priority ?? decision.priority;
+      final isCritical = effectivePriority == HazardPriority.critical;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (!isCritical && _isStableSceneDuplicate(say, nowMs)) {
+        _pushSequenceSample(jpegBytes: inferenceImageBytes);
+        return;
+      }
+      _recordShownDescription(say, nowMs);
 
       _displayText.value = say;
       if (!_isTtsEnabled) {
@@ -440,28 +485,31 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
-      final decision = _speech.evaluate(say);
       debugPrint(
-        '[TTS_GATE] decision allow=${decision.allowSpeak} critical=${decision.isCritical} text="$say"',
+        '[TTS_GATE] decision allow=${decision.allowSpeak} '
+        'critical=$isCritical priority=$effectivePriority text="$say"',
       );
       _pushSequenceSample(jpegBytes: inferenceImageBytes);
 
-      if (!decision.allowSpeak) return;
+      if (!decision.allowSpeak || effectivePriority == HazardPriority.clear) {
+        return;
+      }
 
       final speakDecision = _speakPolicy.decide(
         description: say,
-        isCritical: decision.isCritical,
+        isCritical: isCritical,
       );
       debugPrint(
-        '[TTS_GATE] policy shouldSpeak=${speakDecision.shouldSpeak} critical=${decision.isCritical} text="${speakDecision.text}"',
+        '[TTS_GATE] policy shouldSpeak=${speakDecision.shouldSpeak} '
+        'critical=$isCritical text="${speakDecision.text}"',
       );
       if (!speakDecision.shouldSpeak) return;
-      _triggerVibration(decision.isCritical);
+      _triggerVibration(isCritical);
 
       unawaited(
         _speech.speak(
           speakDecision.text,
-          isCritical: decision.isCritical,
+          isCritical: isCritical,
           ttsEnabled: _isTtsEnabled,
         ),
       );
@@ -477,6 +525,148 @@ class _CameraScreenState extends State<CameraScreen>
     } finally {
       _isProcessingFrame = false;
     }
+  }
+
+  bool _isStableSceneDuplicate(String message, int nowMs) {
+    final prev = _lastSpokenOrShownDescription;
+    if (prev == null || _lastSpokenOrShownAtMs == 0) return false;
+    if (nowMs - _lastSpokenOrShownAtMs > _sameSceneCooldownMs) return false;
+    return _isDescriptionSimilar(prev, message);
+  }
+
+  void _recordShownDescription(String message, int nowMs) {
+    _lastSpokenOrShownDescription = message;
+    _lastSpokenOrShownAtMs = nowMs;
+  }
+
+  bool _isDescriptionSimilar(String a, String b) {
+    final left = _normalizeDescKey(a);
+    final right = _normalizeDescKey(b);
+    if (left.isEmpty || right.isEmpty) return false;
+    if (left == right) return true;
+
+    final shorterLen = left.length < right.length ? left.length : right.length;
+    if (shorterLen >= 16 && (left.contains(right) || right.contains(left))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  String _normalizeDescKey(String text) {
+    return text
+        .toLowerCase()
+        .replaceAll(RegExp(r'^\s*\[(critical|awareness|clear)\]\s*'), '')
+        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]+', unicode: true), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _cleanFinalOutputSentence(String text) {
+    var out = text.trim();
+    if (out.isEmpty) return out;
+
+    out = out.replaceAll(RegExp(r'''^["“”']+|["“”']+$'''), '');
+    out = out.replaceAll(RegExp(r'"{2,}$'), '');
+    out = out.replaceAll(RegExp(r'''(["“”']){2,}'''), '"');
+
+    // Drop translated/echoed instruction tails like "- If dark" / "- ถ้ามืด".
+    out = out.replaceAll(
+      RegExp(
+        r'\s*[-–—]\s*(if\s*(dark|unclear)|ถ้ามืด|หากมืด|ถ้าไม่ชัดเจน|หากไม่ชัดเจน).*$',
+        caseSensitive: false,
+      ),
+      '',
+    );
+
+    // Keep exactly one sentence after translation cleanup.
+    final m = RegExp(r'''^(.+?[.!?]['"]?)(?:\s|$)''').firstMatch(out);
+    if (m != null) {
+      out = (m.group(1) ?? '').trim();
+    }
+
+    out = out.replaceAll(RegExp(r'''["“”']+$'''), '');
+
+    return out.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  _TaggedPriorityResult _extractTaggedPriority(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      return const _TaggedPriorityResult(message: '', priority: null);
+    }
+
+    final m = RegExp(
+      r'^\s*\[(CRITICAL|AWARENESS|CLEAR)\]\s*(.*)$',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (m == null) {
+      return _TaggedPriorityResult(message: trimmed, priority: null);
+    }
+
+    final tag = (m.group(1) ?? '').toUpperCase();
+    final rest = (m.group(2) ?? '').trim();
+    final priority = switch (tag) {
+      'CRITICAL' => HazardPriority.critical,
+      'AWARENESS' => HazardPriority.awareness,
+      'CLEAR' => HazardPriority.clear,
+      _ => null,
+    };
+
+    return _TaggedPriorityResult(
+      message: rest.isEmpty ? trimmed : rest,
+      priority: priority,
+    );
+  }
+
+  _TaggedPriorityResult _selectPriorityCandidateFromRaw(String rawText) {
+    final text = rawText.trim();
+    if (text.isEmpty) {
+      return const _TaggedPriorityResult(message: '', priority: null);
+    }
+
+    final lines = text
+        .split('\n')
+        .map((e) => e.trim())
+        .where(
+          (e) =>
+              e.isNotEmpty &&
+              !RegExp(
+                r'^[-*]?\s*if\s+(unclear|dark|traffic)\b',
+                caseSensitive: false,
+              ).hasMatch(e),
+        )
+        .toList();
+
+    final taggedLines = <_TaggedPriorityResult>[];
+    _TaggedPriorityResult? firstUntagged;
+
+    for (final line in lines) {
+      final parsed = _extractTaggedPriority(line);
+      if (parsed.priority != null) {
+        taggedLines.add(parsed);
+      } else {
+        firstUntagged ??= parsed;
+      }
+    }
+
+    for (final p in const <HazardPriority>[
+      HazardPriority.critical,
+      HazardPriority.awareness,
+      HazardPriority.clear,
+    ]) {
+      for (final c in taggedLines) {
+        if (c.priority == p && c.message.trim().isNotEmpty) {
+          return c;
+        }
+      }
+    }
+
+    if (firstUntagged != null && firstUntagged.message.trim().isNotEmpty) {
+      return firstUntagged;
+    }
+
+    return _extractTaggedPriority(text);
   }
 
   //รวมเฟรม
@@ -528,7 +718,8 @@ class _CameraScreenState extends State<CameraScreen>
       _isSwitchingCamera = true;
     }
 
-    _displayText.value = 'Switching camera...';
+    _displayText.value = 'กำลังสลับกล้อง...';
+    _announceUiAction('กำลังสลับกล้อง');
     _shouldProcessImage = false;
 
     try {
@@ -542,6 +733,7 @@ class _CameraScreenState extends State<CameraScreen>
       _shouldProcessImage = true;
       _startProcessingTimer();
       _displayText.value = _kStatusAnalyzing;
+      _announceUiAction('สลับกล้องสำเร็จ');
     } finally {
       if (mounted && !_isDisposed) {
         setState(() => _isSwitchingCamera = false);
@@ -561,6 +753,9 @@ class _CameraScreenState extends State<CameraScreen>
     await controller.setFlashMode(newMode);
     if (!mounted || _isDisposed) return;
     setState(() => _desiredFlashMode = newMode);
+    _announceUiAction(
+      newMode == FlashMode.torch ? 'เปิดไฟแฟลชแล้ว' : 'ปิดไฟแฟลชแล้ว',
+    );
   }
 
   void _toggleProcessing() {
@@ -571,10 +766,12 @@ class _CameraScreenState extends State<CameraScreen>
     if (_shouldProcessImage) {
       _displayText.value = _kStatusAnalyzing;
       _startProcessingTimer();
+      _announceUiAction('เริ่มการวิเคราะห์แล้ว');
     } else {
       _displayText.value = _kStatusStopped;
       _stopProcessingTimer();
       _speech.stop();
+      _announceUiAction('หยุดการวิเคราะห์แล้ว');
     }
   }
 
@@ -584,9 +781,23 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() => _isTtsEnabled = !_isTtsEnabled);
     _saveSpeechPref(_isTtsEnabled);
 
-    if (!_isTtsEnabled) {
+    if (_isTtsEnabled) {
+      _announceUiAction('เปิดเสียงพูดแล้ว');
+    } else {
       _speech.stop();
+      unawaited(HapticFeedback.mediumImpact());
     }
+  }
+
+  void _announceUiAction(String text) {
+    if (!_isTtsEnabled || _isDisposed) return;
+    unawaited(
+      _speech.speak(
+        text,
+        isCritical: false,
+        ttsEnabled: _isTtsEnabled,
+      ),
+    );
   }
 
   Future<void> _saveSpeechPref(bool enabled) async {
@@ -738,6 +949,10 @@ class _CameraScreenState extends State<CameraScreen>
           CircleButton(
             icon: Icons.settings,
             onTap: () => unawaited(_openSettings()),
+            size: _kBlindControlSize,
+            iconSize: _kBlindIconSize,
+            semanticLabel: 'ตั้งค่า',
+            semanticHint: 'แตะเพื่อเปิดหน้าการตั้งค่า',
           ),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -747,9 +962,16 @@ class _CameraScreenState extends State<CameraScreen>
                     ? Icons.flash_on
                     : Icons.flash_off,
                 onTap: () => unawaited(_toggleFlash()),
+                size: _kBlindControlSize,
+                iconSize: _kBlindIconSize,
                 color: _desiredFlashMode == FlashMode.torch
                     ? Colors.yellow
                     : Colors.white,
+                selected: _desiredFlashMode == FlashMode.torch,
+                semanticLabel: _desiredFlashMode == FlashMode.torch
+                    ? 'ไฟแฟลช เปิดอยู่'
+                    : 'ไฟแฟลช ปิดอยู่',
+                semanticHint: 'แตะเพื่อเปิดหรือปิดไฟแฟลช',
               ),
             ],
           ),
@@ -772,7 +994,14 @@ class _CameraScreenState extends State<CameraScreen>
             CircleButton(
               icon: _isTtsEnabled ? Icons.volume_up : Icons.volume_off,
               onTap: _toggleTts,
+              size: _kBlindControlSize,
+              iconSize: _kBlindIconSize,
               color: _isTtsEnabled ? Colors.white : Colors.white54,
+              selected: _isTtsEnabled,
+              semanticLabel: _isTtsEnabled
+                  ? 'เสียงพูด เปิดอยู่'
+                  : 'เสียงพูด ปิดอยู่',
+              semanticHint: 'แตะเพื่อเปิดหรือปิดเสียงพูด',
             ),
             _buildStartStopButton(),
             if (widget.cameras.length > 1)
@@ -782,10 +1011,14 @@ class _CameraScreenState extends State<CameraScreen>
                   if (_isSwitchingCamera) return;
                   unawaited(_switchCamera());
                 },
+                size: _kBlindControlSize,
+                iconSize: _kBlindIconSize,
                 color: _isSwitchingCamera ? Colors.white54 : Colors.white,
+                semanticLabel: 'สลับกล้อง',
+                semanticHint: 'แตะเพื่อสลับกล้องหน้าและหลัง',
               )
             else
-              const SizedBox(width: 44),
+              const SizedBox(width: _kBlindControlSize),
           ],
         ),
       ),
@@ -793,30 +1026,40 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildStartStopButton() {
-    return GestureDetector(
-      onTap: _toggleProcessing,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        decoration: BoxDecoration(
-          color: _shouldProcessImage ? Colors.red : Colors.green,
-          borderRadius: BorderRadius.circular(25),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              _shouldProcessImage ? Icons.stop : Icons.play_arrow,
-              color: Colors.white,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              _shouldProcessImage ? 'STOP' : 'START',
-              style: const TextStyle(
+    return Semantics(
+      button: true,
+      selected: _shouldProcessImage,
+      label: _shouldProcessImage
+          ? 'กำลังวิเคราะห์ แตะเพื่อหยุด'
+          : 'หยุดการวิเคราะห์ แตะเพื่อเริ่ม',
+      hint: 'ปุ่มหลักสำหรับควบคุมการวิเคราะห์ภาพ',
+      child: GestureDetector(
+        onTap: _toggleProcessing,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
+          decoration: BoxDecoration(
+            color: _shouldProcessImage ? Colors.red : Colors.green,
+            borderRadius: BorderRadius.circular(25),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _shouldProcessImage ? Icons.stop : Icons.play_arrow,
                 color: Colors.white,
-                fontWeight: FontWeight.bold,
+                size: 28,
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              Text(
+                _shouldProcessImage ? 'หยุด' : 'เริ่ม',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 20,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -849,7 +1092,7 @@ class _CameraScreenState extends State<CameraScreen>
             const Icon(Icons.error_outline, size: 80, color: Colors.red),
             const SizedBox(height: 16),
             Text(
-              _errorMessage ?? 'Unknown error',
+              _errorMessage ?? 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ',
               style: const TextStyle(color: Colors.white, fontSize: 18),
               textAlign: TextAlign.center,
             ),
@@ -873,7 +1116,7 @@ class _CameraScreenState extends State<CameraScreen>
             ),
             const SizedBox(height: 16),
             const Text(
-              'Camera Access Required',
+              'ต้องอนุญาตการเข้าถึงกล้อง',
               style: TextStyle(color: Colors.white, fontSize: 20),
               textAlign: TextAlign.center,
             ),
@@ -881,7 +1124,7 @@ class _CameraScreenState extends State<CameraScreen>
             ElevatedButton.icon(
               onPressed: openAppSettings,
               icon: const Icon(Icons.settings),
-              label: const Text('Open Settings'),
+              label: const Text('เปิดการตั้งค่า'),
             ),
           ],
         ),
@@ -894,4 +1137,11 @@ class _SequencePreviewSample {
   final Uint8List jpegBytes;
 
   const _SequencePreviewSample({required this.jpegBytes});
+}
+
+class _TaggedPriorityResult {
+  final String message;
+  final HazardPriority? priority;
+
+  const _TaggedPriorityResult({required this.message, required this.priority});
 }

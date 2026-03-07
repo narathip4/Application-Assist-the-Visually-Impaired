@@ -22,21 +22,26 @@ class DisplayTextBox extends StatelessWidget {
       child: ValueListenableBuilder<String>(
         valueListenable: textListenable,
         builder: (context, text, child) {
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white24, width: 1.5),
-            ),
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                height: 1.4,
+          return Semantics(
+            liveRegion: true,
+            label: 'สถานะการมองเห็น',
+            value: text,
+            child: Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white24, width: 1.5),
               ),
-              textAlign: TextAlign.center,
+              child: Text(
+                text,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  height: 1.4,
+                ),
+                textAlign: TextAlign.center,
+              ),
             ),
           );
         },

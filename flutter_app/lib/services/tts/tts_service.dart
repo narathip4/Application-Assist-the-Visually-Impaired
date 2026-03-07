@@ -68,11 +68,12 @@ class TtsService {
     await stop(); // ensure no overlap
 
     _speakCompleter = Completer<void>();
+    final speakFuture = _speakCompleter!.future;
     // ignore: avoid_print
     print('[TTS] speak="$text"');
     await _tts.speak(text);
 
-    return _speakCompleter!.future;
+    return speakFuture;
   }
 
   Future<void> stop() async {

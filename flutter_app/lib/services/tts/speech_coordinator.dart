@@ -1,10 +1,17 @@
 import 'package:flutter/foundation.dart';
 import 'tts_service.dart';
 
+enum HazardPriority { clear, awareness, critical }
+
 class SpeechDecision {
+  final HazardPriority priority;
   final bool isCritical;
   final bool allowSpeak;
-  const SpeechDecision({required this.isCritical, required this.allowSpeak});
+  const SpeechDecision({
+    required this.priority,
+    required this.isCritical,
+    required this.allowSpeak,
+  });
 }
 
 class SpeechCoordinator {
@@ -241,9 +248,6 @@ class SpeechCoordinator {
   SpeechDecision evaluate(String message) =>
       _evaluateInternal(message, recordSoftSequenceHit: true);
 
-  bool isCriticalMessage(String message) =>
-      _evaluateInternal(message, recordSoftSequenceHit: false).isCritical;
-
   Future<void> speak(
     String text, {
     required bool isCritical,
@@ -311,46 +315,75 @@ class SpeechCoordinator {
     // Tier 1: Always critical
     if (_containsAnyLoose(t, _infrastructureHazards) ||
         _containsAnyLoose(t, _vehicleHazards)) {
-      return const SpeechDecision(isCritical: true, allowSpeak: true);
+      return const SpeechDecision(
+        priority: HazardPriority.critical,
+        isCritical: true,
+        allowSpeak: true,
+      );
     }
 
     // Navigation aids: critical only with proximity cue
     if (_containsAnyLoose(t, _navigationAids)) {
       final near = _containsAnyLoose(t, _nearCues);
-      return SpeechDecision(isCritical: near, allowSpeak: true);
+      return SpeechDecision(
+        priority: near ? HazardPriority.critical : HazardPriority.awareness,
+        isCritical: near,
+        allowSpeak: true,
+      );
     }
 
     // Surface + proximity
     if (_containsAnyLoose(t, _surfaceConditions) &&
         _containsAnyLoose(t, _nearCues)) {
-      return const SpeechDecision(isCritical: true, allowSpeak: true);
+      return const SpeechDecision(
+        priority: HazardPriority.critical,
+        isCritical: true,
+        allowSpeak: true,
+      );
     }
 
     // Directional + proximity or infrastructure
     if (_containsAnyLoose(t, _directionalCues) &&
         (_containsAnyLoose(t, _nearCues) ||
             _containsAnyLoose(t, _infrastructureHazards))) {
-      return const SpeechDecision(isCritical: true, allowSpeak: true);
+      return const SpeechDecision(
+        priority: HazardPriority.critical,
+        isCritical: true,
+        allowSpeak: true,
+      );
     }
 
     // Tier 2: Proximity-critical
     if (_containsAnyLoose(t, _movingObjects) ||
         _containsAnyLoose(t, _animalHazards)) {
       final near = _containsAnyLoose(t, _nearCues);
-      return SpeechDecision(isCritical: near, allowSpeak: true);
+      return SpeechDecision(
+        priority: near ? HazardPriority.critical : HazardPriority.awareness,
+        isCritical: near,
+        allowSpeak: true,
+      );
     }
 
     // Tier 3: Soft hazards (people)
     final softKinds = _detectSoftHazardKinds(t);
     if (softKinds.isEmpty) {
-      return const SpeechDecision(isCritical: false, allowSpeak: true);
+      // Quiet mode: no actionable cue found, keep UI text but skip TTS.
+      return const SpeechDecision(
+        priority: HazardPriority.clear,
+        isCritical: false,
+        allowSpeak: false,
+      );
     }
 
     if (recordSoftSequenceHit) _recordSoftHits(nowMs, softKinds);
 
     final hasNearCue = _containsAnyLoose(t, _nearCues);
     if (hasNearCue) {
-      return const SpeechDecision(isCritical: true, allowSpeak: true);
+      return const SpeechDecision(
+        priority: HazardPriority.critical,
+        isCritical: true,
+        allowSpeak: true,
+      );
     }
 
     final persistent = _isPersistent(
@@ -358,7 +391,11 @@ class SpeechCoordinator {
       softKinds,
       prune: recordSoftSequenceHit,
     );
-    return SpeechDecision(isCritical: false, allowSpeak: persistent);
+    return SpeechDecision(
+      priority: HazardPriority.awareness,
+      isCritical: false,
+      allowSpeak: persistent,
+    );
   }
 
   // ---------------------------------------------------------------------------

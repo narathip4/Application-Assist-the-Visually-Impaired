@@ -7,6 +7,9 @@ class CircleButton extends StatelessWidget {
   final Color bgColor;
   final double size;
   final double iconSize;
+  final String? semanticLabel;
+  final String? semanticHint;
+  final bool selected;
 
   const CircleButton({
     super.key,
@@ -16,28 +19,37 @@ class CircleButton extends StatelessWidget {
     this.bgColor = const Color.fromARGB(100, 0, 0, 0),
     this.size = 44,
     this.iconSize = 24,
+    this.semanticLabel,
+    this.semanticHint,
+    this.selected = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: bgColor,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              // ignore: deprecated_member_use
-              color: Colors.black.withOpacity(0.3),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: semanticLabel,
+      hint: semanticHint,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: bgColor,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                // ignore: deprecated_member_use
+                color: Colors.black.withOpacity(0.3),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Icon(icon, color: color, size: iconSize),
         ),
-        child: Icon(icon, color: color, size: iconSize),
       ),
     );
   }
