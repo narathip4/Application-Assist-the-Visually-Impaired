@@ -9,7 +9,7 @@ class AppConfig {
   // VLM parameters
   // maxNewTokens: Limits response length to keep descriptions concise
   // Lower values = faster responses, but may cut off important details
-  static const int maxNewTokens = 32;
+  static const int maxNewTokens = 48;
 
   // Image optimization settings
   // jpegMaxSide: Reduces image size for faster processing while maintaining recognition quality
@@ -35,16 +35,6 @@ Rules:
 - No extra explanation.
 - No chatbot/polite phrases (never say: "I hope this helps", "let me know", "anything else").
 - Output one sentence only.
-
-Special cases:
-- If unclear: "Image unclear, please scan again."
-- If dark: "Image too dark, please move to a brighter area."
-- If traffic: "Careful, traffic area detected, stop and reorient."
-
-Examples:
-- "Careful, a man in a white shirt is walking ahead toward you."
-- "Careful, a white dog is ahead and getting closer."
-- "A walking path is ahead with glass panels on the side."
 ''';
 
   // User-facing message shown while processing
@@ -58,5 +48,5 @@ Examples:
   // Timing configuration
   // inferenceInterval: How often the app captures and processes new images
   // 1200ms (1.2 seconds) balances responsiveness with processing load
-  static const Duration inferenceInterval = Duration(milliseconds: 900);
+  static const Duration inferenceInterval = Duration(milliseconds: 1200);
 }

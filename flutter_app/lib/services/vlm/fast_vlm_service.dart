@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:app/app/config.dart';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' as http_parser;
 
@@ -50,10 +51,7 @@ class FastVlmService {
     r"(person|people|man|woman|child|pedestrian|group)",
     caseSensitive: false,
   );
-  static final _animalRegex = RegExp(
-    r"(dog|cat|animal)",
-    caseSensitive: false,
-  );
+  static final _animalRegex = RegExp(r"(dog|cat|animal)", caseSensitive: false);
   static final _definiteHazardObjectRegex = RegExp(
     r"(pole|bicycle|bike|obstacle|stairs|step|open door|low obstacle|drop[- ]?off)",
     caseSensitive: false,
@@ -79,11 +77,27 @@ class FastVlmService {
     caseSensitive: false,
   );
 
-  FastVlmService(
-    this.baseUrl, {
-    required this.timeout,
-    http.Client? client,
-  }) : _client = client ?? http.Client() {
+  // Detects when the model echoes its own system-prompt text back.
+  // Each sub-pattern is a phrase that only appears in our prompt, never in a
+  // real scene description.  Two or more hits → treat as a prompt echo.
+  static final _promptEchoSignals = <RegExp>[
+    RegExp(r'you are a (real.?time|safety|visually)', caseSensitive: false),
+    RegExp(r'return exactly one', caseSensitive: false),
+    RegExp(r'focus only on (immediate|walking)', caseSensitive: false),
+    RegExp(r'mention only the highest.?risk', caseSensitive: false),
+    RegExp(r'no extra explanation', caseSensitive: false),
+    RegExp(r'no chatbot', caseSensitive: false),
+    RegExp(r'output one sentence only', caseSensitive: false),
+    RegExp(r'real.?time safety assistant', caseSensitive: false),
+    RegExp(r'visually impaired user', caseSensitive: false),
+    RegExp(r'special cases\s*:', caseSensitive: false),
+    RegExp(r'include one position word', caseSensitive: false),
+    RegExp(r'use "careful,"', caseSensitive: false),
+    RegExp(r'(never say|no polite phrases)', caseSensitive: false),
+  ];
+
+  FastVlmService(this.baseUrl, {required this.timeout, http.Client? client})
+    : _client = client ?? http.Client() {
     _normalizedBase = baseUrl.replaceAll(RegExp(r'/$'), '');
   }
 
@@ -110,8 +124,9 @@ class FastVlmService {
     final req = http.MultipartRequest('POST', uri)
       ..fields['prompt'] = prompt
       ..fields['max_new_tokens'] = maxNewTokens.toString()
-      ..fields['temperature'] =
-          (temperature ?? 0.5).clamp(0.0, 1.0).toStringAsFixed(2)
+      ..fields['temperature'] = (temperature ?? 0.5)
+          .clamp(0.0, 1.0)
+          .toStringAsFixed(2)
       ..files.add(
         http.MultipartFile.fromBytes(
           'image',
@@ -161,8 +176,46 @@ class FastVlmService {
     return '';
   }
 
+  /// Returns true if [text] looks like the model echoed back the system prompt.
+  /// We require ≥2 independent signals so a single coincidental word doesn't
+  /// suppress a real observation.
+  bool _isSystemPromptEcho(String text) {
+    int hits = 0;
+    for (final pattern in _promptEchoSignals) {
+      if (pattern.hasMatch(text)) {
+        hits++;
+        if (hits >= 2) return true;
+      }
+    }
+    return false;
+  }
+
+  /// Returns true if [text] is a verbatim copy of one of the Special-Cases
+  /// canned phrases baked into the prompt template.  These should only ever
+  /// be produced by our own sanitizer, never parroted from the model.
+  bool _isVerbatimSpecialCaseEcho(String text) {
+    final t = text.toLowerCase().trim().replaceAll(RegExp(r'\s+'), ' ');
+    const verbatim = <String>[
+      'image unclear, please scan again.',
+      'image too dark, please move to a brighter area.',
+      'careful, traffic area detected, stop and reorient.',
+      'careful, traffic area detected ahead, stop and reorient.',
+    ];
+    return verbatim.contains(t);
+  }
+
   String _sanitize(String raw) {
     var text = raw.trim();
+
+    // ── Prompt-echo guard (check raw, before any stripping) ──────────────────
+    // If the model simply repeated our system prompt or its Special Cases
+    // lines, bail out immediately rather than letting a coincidental first
+    // sentence slip through as a real observation.
+    if (_isSystemPromptEcho(text)) {
+      debugPrint('[VLM] prompt-echo detected (system prompt), dropping.');
+      return '';
+    }
+
     text = text.replaceAll(RegExp(r'^[\-\*\d\.\)\s"]+'), '');
     text = text.replaceAll(RegExp(r'\s+'), ' ');
     text = _stripPromptEchoSegments(text);
@@ -192,13 +245,23 @@ class FastVlmService {
       return 'Image unclear, please scan again.';
     }
 
+    // After sentence trimming, re-check: if the kept sentence is itself one of
+    // our Special-Cases canned phrases echoed verbatim, the model is parroting
+    // the prompt rather than describing the scene.
+    if (_isVerbatimSpecialCaseEcho(text)) {
+      debugPrint('[VLM] verbatim special-case echo detected, dropping.');
+      return '';
+    }
+
     // Strict fallback normalization.
     if (_unclearFallbackPrefixRegex.hasMatch(text) ||
-        (_unclearRegex.hasMatch(text) && !RegExp(r"\bif unclear\b", caseSensitive: false).hasMatch(text))) {
+        (_unclearRegex.hasMatch(text) &&
+            !RegExp(r"\bif unclear\b", caseSensitive: false).hasMatch(text))) {
       return 'Image unclear, please scan again.';
     }
     if (_darkFallbackPrefixRegex.hasMatch(text) ||
-        (_darkRegex.hasMatch(text) && !RegExp(r"\bif dark\b", caseSensitive: false).hasMatch(text))) {
+        (_darkRegex.hasMatch(text) &&
+            !RegExp(r"\bif dark\b", caseSensitive: false).hasMatch(text))) {
       return 'Image too dark, please move to a brighter area.';
     }
     if (_looksLikeTrafficScene(text)) {
@@ -242,7 +305,7 @@ class FastVlmService {
   String _stripPromptEchoSegments(String text) {
     var out = text;
 
-    // Remove echoed instruction bullets from prompt templates.
+    // Remove echoed instruction bullets: "- If unclear: "..." "
     out = out.replaceAll(
       RegExp(
         r'(\-?\s*if\s+(unclear|dark|traffic)\s*:\s*"[^"]*"\s*)',
@@ -257,9 +320,46 @@ class FastVlmService {
       ),
       ' ',
     );
-    out = out.replaceAll(RegExp(r'\bexamples?\s*:\b', caseSensitive: false), ' ');
-    out = out.replaceAll(RegExp(r'\s+'), ' ').trim();
 
+    // Remove prompt preamble/instructions if the model echoes them inline.
+    out = out.replaceAll(
+      RegExp(
+        r'you are a real.?time safety assistant[^.]*\.',
+        caseSensitive: false,
+      ),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'return exactly one [^.]+\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'focus only on [^.]+\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'mention only the [^.]+\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'\bexamples?\s*:\b', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'\bspecial cases\s*:\s*', caseSensitive: false),
+      ' ',
+    );
+
+    // Strip trailing rule/bullet lines that sometimes appear after the real answer.
+    out = out.replaceAll(
+      RegExp(
+        r'\s*[\-\*]\s*(use|include|mention|no |never |output one)[^\n]*',
+        caseSensitive: false,
+      ),
+      '',
+    );
+
+    out = out.replaceAll(RegExp(r'\s+'), ' ').trim();
     return out;
   }
 

@@ -40,10 +40,6 @@ class _CameraScreenState extends State<CameraScreen>
   static const String _kSubtitleKey = 'ui.subtitle';
   static const String _kVibrationKey = 'ui.vibration';
   static const String _kTranslateToThaiKey = 'ui.translateToThai';
-  static const String _kMaxTokensKey = 'model.maxTokens';
-  static const String _kTemperatureKey = 'model.temperature';
-  static const int _kDefaultMaxTokens = 32;
-  static const double _kDefaultTemperature = 0.5;
   static const String _kStatusAnalyzing = 'กำลังวิเคราะห์...';
   static const String _kStatusStopped = 'หยุดการวิเคราะห์แล้ว';
   static const double _kBlindControlSize = 58;
@@ -72,8 +68,6 @@ class _CameraScreenState extends State<CameraScreen>
   bool _subtitleEnabled = true;
   bool _isVibrationEnabled = true;
   bool _translateToThai = true;
-  int _maxTokens = _kDefaultMaxTokens;
-  double _temperature = _kDefaultTemperature;
 
   // -------------------- Processing --------------------
   bool _shouldProcessImage = true;
@@ -100,10 +94,6 @@ class _CameraScreenState extends State<CameraScreen>
   final ValueNotifier<String> _displayText = ValueNotifier<String>(
     'กำลังเริ่มต้นระบบ...',
   );
-  final ValueNotifier<List<_SequencePreviewSample>> _sequenceSamples =
-      ValueNotifier<List<_SequencePreviewSample>>(
-        const <_SequencePreviewSample>[],
-      );
   String? _errorMessage;
 
   // -------------------- Lifecycle --------------------
@@ -189,15 +179,9 @@ class _CameraScreenState extends State<CameraScreen>
     if (_isDisposed) return;
 
     _isTtsEnabled = prefs.getBool(_kSpeechKey) ?? true;
-    if (!_isTtsEnabled) {
-      _isTtsEnabled = true;
-      await prefs.setBool(_kSpeechKey, true);
-    }
     _subtitleEnabled = prefs.getBool(_kSubtitleKey) ?? true;
     _isVibrationEnabled = prefs.getBool(_kVibrationKey) ?? true;
     _translateToThai = prefs.getBool(_kTranslateToThaiKey) ?? true;
-    _maxTokens = prefs.getInt(_kMaxTokensKey) ?? _kDefaultMaxTokens;
-    _temperature = prefs.getDouble(_kTemperatureKey) ?? _kDefaultTemperature;
   }
 
   Future<void> _requestCameraPermission() async {
@@ -270,7 +254,6 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     _displayText.dispose();
-    _sequenceSamples.dispose();
     super.dispose();
   }
 
@@ -431,8 +414,8 @@ class _CameraScreenState extends State<CameraScreen>
       final sayRaw = await _inference.describeJpegBytesWithPrompt(
         inferenceImageBytes,
         prompt: prompt,
-        maxNewTokens: _maxTokens,
-        temperature: _temperature,
+        maxNewTokens: AppConfig.maxNewTokens,
+        temperature: 0.5,
       );
       final inferenceLatencyMs =
           DateTime.now().millisecondsSinceEpoch - inferenceStartMs;
@@ -474,14 +457,12 @@ class _CameraScreenState extends State<CameraScreen>
       final isCritical = effectivePriority == HazardPriority.critical;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (!isCritical && _isStableSceneDuplicate(say, nowMs)) {
-        _pushSequenceSample(jpegBytes: inferenceImageBytes);
         return;
       }
       _recordShownDescription(say, nowMs);
 
       _displayText.value = say;
       if (!_isTtsEnabled) {
-        _pushSequenceSample(jpegBytes: inferenceImageBytes);
         return;
       }
 
@@ -489,7 +470,6 @@ class _CameraScreenState extends State<CameraScreen>
         '[TTS_GATE] decision allow=${decision.allowSpeak} '
         'critical=$isCritical priority=$effectivePriority text="$say"',
       );
-      _pushSequenceSample(jpegBytes: inferenceImageBytes);
 
       if (!decision.allowSpeak || effectivePriority == HazardPriority.clear) {
         return;
@@ -727,6 +707,12 @@ class _CameraScreenState extends State<CameraScreen>
       await _speech.stop();
       await _waitForOngoingFrameProcessing();
 
+      // New camera = new scene: clear sequence buffer and dedup memory so the
+      // first result from the switched camera is always fresh.
+      _sequenceFrameBuffer.clear();
+      _lastSpokenOrShownDescription = null;
+      _lastSpokenOrShownAtMs = 0;
+
       final newIndex = (_currentCameraIndex + 1) % widget.cameras.length;
       await _ensureCameraInitialized(newIndex);
 
@@ -764,6 +750,13 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() => _shouldProcessImage = !_shouldProcessImage);
 
     if (_shouldProcessImage) {
+      // Clear stale sequence frames so old visual context from before the
+      // pause does not bleed into the first inference after restart.
+      _sequenceFrameBuffer.clear();
+      // Reset dedup memory so the first new result is always spoken.
+      _lastSpokenOrShownDescription = null;
+      _lastSpokenOrShownAtMs = 0;
+
       _displayText.value = _kStatusAnalyzing;
       _startProcessingTimer();
       _announceUiAction('เริ่มการวิเคราะห์แล้ว');
@@ -792,11 +785,7 @@ class _CameraScreenState extends State<CameraScreen>
   void _announceUiAction(String text) {
     if (!_isTtsEnabled || _isDisposed) return;
     unawaited(
-      _speech.speak(
-        text,
-        isCritical: false,
-        ttsEnabled: _isTtsEnabled,
-      ),
+      _speech.speak(text, isCritical: false, ttsEnabled: _isTtsEnabled),
     );
   }
 
@@ -868,74 +857,9 @@ class _CameraScreenState extends State<CameraScreen>
           textListenable: _displayText,
           subtitleEnabled: _subtitleEnabled,
         ),
-        _buildSequencePreviewStrip(),
         _buildBottomControls(),
       ],
     );
-  }
-
-  Widget _buildSequencePreviewStrip() {
-    return Positioned(
-      top: 84,
-      left: 12,
-      right: 12,
-      child: IgnorePointer(
-        child: ValueListenableBuilder<List<_SequencePreviewSample>>(
-          valueListenable: _sequenceSamples,
-          builder: (context, samples, child) {
-            if (samples.isEmpty) return const SizedBox.shrink();
-
-            return Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.66),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white24),
-              ),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: samples
-                      .map((sample) => _buildSequencePreviewCard(sample))
-                      .toList(),
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSequencePreviewCard(_SequencePreviewSample sample) {
-    return Container(
-      width: 74,
-      margin: const EdgeInsets.only(right: 8),
-      child: Container(
-        width: 72,
-        height: 72,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white24, width: 1.2),
-          image: DecorationImage(
-            image: MemoryImage(sample.jpegBytes),
-            fit: BoxFit.cover,
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _pushSequenceSample({required Uint8List jpegBytes}) {
-    final next = <_SequencePreviewSample>[
-      ..._sequenceSamples.value,
-      _SequencePreviewSample(jpegBytes: jpegBytes),
-    ];
-    if (next.length > 4) {
-      next.removeRange(0, next.length - 4);
-    }
-
-    _sequenceSamples.value = next;
   }
 
   Widget _buildTopControls() {
@@ -1131,12 +1055,6 @@ class _CameraScreenState extends State<CameraScreen>
       ),
     );
   }
-}
-
-class _SequencePreviewSample {
-  final Uint8List jpegBytes;
-
-  const _SequencePreviewSample({required this.jpegBytes});
 }
 
 class _TaggedPriorityResult {
