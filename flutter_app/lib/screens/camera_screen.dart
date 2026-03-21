@@ -408,7 +408,7 @@ class _CameraScreenState extends State<CameraScreen>
       final rotation = widget.cameras[_currentCameraIndex].sensorOrientation;
       final jpegBytes = await _inference.yuvToJpeg(img, rotation);
       final inferenceImageBytes = _buildSequenceInferenceImage(jpegBytes);
-      const prompt = AppConfig.safetyPrompt;
+      const prompt = AppConfig.prompt;
 
       final inferenceStartMs = DateTime.now().millisecondsSinceEpoch;
       final sayRaw = await _inference.describeJpegBytesWithPrompt(

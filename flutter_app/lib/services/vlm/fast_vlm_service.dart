@@ -94,6 +94,14 @@ class FastVlmService {
     RegExp(r'include one position word', caseSensitive: false),
     RegExp(r'use "careful,"', caseSensitive: false),
     RegExp(r'(never say|no polite phrases)', caseSensitive: false),
+    RegExp(r'sensor output only', caseSensitive: false),
+    RegExp(r'describe immediate walking safety', caseSensitive: false),
+    RegExp(r'mention only the main hazard', caseSensitive: false),
+    RegExp(r'path clear ahead', caseSensitive: false),
+    RegExp(r'no distances', caseSensitive: false),
+    RegExp(r'objects\s*:', caseSensitive: false),
+    RegExp(r'states\s*:', caseSensitive: false),
+    RegExp(r'positions\s*:', caseSensitive: false),
   ];
 
   FastVlmService(this.baseUrl, {required this.timeout, http.Client? client})
@@ -227,7 +235,8 @@ class FastVlmService {
     }
 
     if (text.isEmpty) {
-      return 'The image is unclear and difficult to understand.';
+      debugPrint('[VLM] empty text response, dropping.');
+      return '';
     }
 
     if (_refusalRegex.hasMatch(text)) {
@@ -342,11 +351,35 @@ class FastVlmService {
       ' ',
     );
     out = out.replaceAll(
+      RegExp(r'sensor output only[^.]*\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'describe immediate walking safety[^.]*\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'mention only the main hazard[^.]*\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'say "path clear ahead\." if [^.]+\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'no distances[^.]*\.', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
       RegExp(r'\bexamples?\s*:\b', caseSensitive: false),
       ' ',
     );
     out = out.replaceAll(
       RegExp(r'\bspecial cases\s*:\s*', caseSensitive: false),
+      ' ',
+    );
+    out = out.replaceAll(
+      RegExp(r'\b(objects|states|positions)\s*:[^.]*\.', caseSensitive: false),
       ' ',
     );
 

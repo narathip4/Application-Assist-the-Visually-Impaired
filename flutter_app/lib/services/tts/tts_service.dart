@@ -9,7 +9,7 @@ class TtsService {
   Completer<void>? _speakCompleter;
 
   static const String _kSpeechRateKey = 'tts.speechRate';
-  static const double _defaultSpeechRate = 0.5;
+  static const double _defaultSpeechRate = 1.0;
 
   Future<void> init() async {
     if (_initialized) return;

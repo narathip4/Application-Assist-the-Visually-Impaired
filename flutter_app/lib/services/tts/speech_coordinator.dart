@@ -23,7 +23,7 @@ class SpeechCoordinator {
   String? _lastCriticalTextKey;
   int _lastCriticalSpokenAtMs = 0;
 
-  static const int _criticalRepeatSuppressMs = 1200;
+  static const int _criticalRepeatSuppressMs = 1500;
   static const Duration _softEscalationWindow = Duration(milliseconds: 3800);
   static const int _softEscalationHits = 2;
   static const String _softKindPerson = 'person';
