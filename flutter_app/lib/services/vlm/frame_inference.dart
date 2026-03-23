@@ -36,17 +36,18 @@ class FrameInference {
     Uint8List jpegBytes, {
     required String prompt,
     int? maxNewTokens,
-    double? temperature,
   }) async {
+    final totalTimeout = Duration(
+      milliseconds: (vlmService.timeout.inMilliseconds * 3) + 5000,
+    );
     final resp = await vlmService
         .describeJpegBytes(
           jpegBytes,
           prompt: prompt,
           maxNewTokens: maxNewTokens ?? AppConfig.maxNewTokens,
-          temperature: temperature,
         )
         .timeout(
-          const Duration(seconds: 60),
+          totalTimeout,
           onTimeout: () => throw TimeoutException('VLM request timed out'),
         );
     return resp.say;

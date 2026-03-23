@@ -4,8 +4,18 @@ import 'google_translate_service.dart';
 
 class TranslateDescriptionUseCase {
   final GoogleTranslateService _translator;
+  static const Duration _translateDeadline = Duration(milliseconds: 1800);
 
   static final RegExp _thaiRegex = RegExp(r'[\u0E00-\u0E7F]');
+  static const Map<String, String> _canonicalThaiMap = {
+    'too dark to see clearly.': 'แสงสว่างไม่เพียงพอ มองไม่ชัด',
+    'scene unclear, cannot confirm what is ahead.':
+        'ภาพไม่ชัด ยืนยันสิ่งที่อยู่ข้างหน้าไม่ได้',
+    'the path is clear ahead.': 'ทางข้างหน้าโล่ง',
+    'the path ahead is clear.': 'ทางข้างหน้าโล่ง',
+    'the walkway ahead is clear.': 'ทางข้างหน้าโล่ง',
+    'path clear ahead.': 'ทางข้างหน้าโล่ง',
+  };
 
   TranslateDescriptionUseCase({required GoogleTranslateService translator})
     : _translator = translator;
@@ -20,12 +30,17 @@ class TranslateDescriptionUseCase {
     if (text.isEmpty || !enabled) return text;
     if (_thaiRegex.hasMatch(text)) return text;
 
+    final canonicalThai = _canonicalThaiMap[_normalizeKey(text)];
+    if (canonicalThai != null) return canonicalThai;
+
     try {
-      return await _translator.translate(
-        text: text,
-        sourceLanguage: sourceLanguage,
-        targetLanguage: targetLanguage,
-      );
+      return await _translator
+          .translate(
+            text: text,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+          )
+          .timeout(_translateDeadline);
     } catch (e) {
       debugPrint('[Translation] fallback to original: $e');
       return text;
@@ -34,5 +49,9 @@ class TranslateDescriptionUseCase {
 
   void dispose() {
     _translator.dispose();
+  }
+
+  String _normalizeKey(String text) {
+    return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 }

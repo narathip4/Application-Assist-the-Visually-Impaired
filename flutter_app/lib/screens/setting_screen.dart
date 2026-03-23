@@ -21,7 +21,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _speech = true;
   bool _subtitle = true;
   bool _translateToThai = true;
-  double _speechRate = 0.5;
+  double _speechRate = 0.85;
 
   bool _loading = true;
 
@@ -40,7 +40,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _speech = prefs.getBool(_kSpeechKey) ?? true;
       _subtitle = prefs.getBool(_kSubtitleKey) ?? true;
       _translateToThai = prefs.getBool(_kTranslateToThaiKey) ?? true;
-      _speechRate = prefs.getDouble(_kSpeechRateKey) ?? 0.5;
+      _speechRate = prefs.getDouble(_kSpeechRateKey) ?? 0.85;
       _loading = false;
     });
   }

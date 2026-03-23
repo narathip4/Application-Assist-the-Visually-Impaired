@@ -22,6 +22,7 @@ class SpeechCoordinator {
   String? _activeTextKey;
   String? _lastCriticalTextKey;
   int _lastCriticalSpokenAtMs = 0;
+  int _activeSpeechSessionId = 0;
 
   static const int _criticalRepeatSuppressMs = 1500;
   static const Duration _softEscalationWindow = Duration(milliseconds: 3800);
@@ -48,12 +49,12 @@ class SpeechCoordinator {
     'กำแพง',
     'เสา',
     'เสาไฟฟ้า',
+    'เสาอากาศ',
     'ประตู',
     'ประตูอัตโนมัติ',
     'กระจก',
     'สิ่งกีดขวาง',
     'กีดขวาง',
-    'ต้นไม้',
     'ป้ายจราจร',
     'ทางลาด',
     'ท่อระบายน้ำ',
@@ -74,12 +75,12 @@ class SpeechCoordinator {
     'curb',
     'wall',
     'pole',
+    'pillar',
     'power pole',
     'door',
     'automatic door',
     'glass',
     'obstacle',
-    'tree',
     'sign',
     'traffic sign',
     'ramp',
@@ -94,12 +95,14 @@ class SpeechCoordinator {
   static const List<String> _vehicleHazards = [
     'รถยนต์',
     'รถบรรทุก',
+    'รถกระบะ',
     'รถโดยสาร',
     'มอเตอร์ไซค์',
     'รถจักรยานยนต์',
     'จักรยาน',
     'car',
     'truck',
+    'pickup truck',
     'bus',
     'motorcycle',
     'motorbike',
@@ -107,7 +110,24 @@ class SpeechCoordinator {
     'bike',
     'bicycle',
   ];
-
+  static const List<String> _vehicleCriticalCues = [
+    'เข้าใกล้',
+    'กำลังเข้าใกล้',
+    'เคลื่อนที่',
+    'กำลังเคลื่อนที่',
+    'วิ่งมา',
+    'ขับมา',
+    'ตัดหน้า',
+    'ขวางทาง',
+    'ขวางหน้า',
+    'approaching',
+    'moving',
+    'coming toward',
+    'driving toward',
+    'crossing',
+    'blocking',
+    'in your path',
+  ];
   static const List<String> _animalHazards = [
     'สุนัข',
     'แมว',
@@ -243,6 +263,42 @@ class SpeechCoordinator {
     'nearby',
   ];
 
+  static const List<String> _clearPhrases = [
+    'clear ahead',
+    'is clear',
+    'ahead is clear',
+    'the path is clear ahead',
+    'the walkway ahead is clear',
+    'clear path ahead',
+    'ข้างหน้าโล่ง',
+    'ข้างหน้าโล่ง เดินต่อได้',
+    'ข้างหน้าปลอดโปร่ง',
+    'ทางข้างหน้าปลอดภัย',
+    'ทางด้านหน้าโล่ง',
+    'เส้นทางข้างหน้าโล่ง',
+  ];
+  static const List<String> _lowVisibilityPhrases = [
+    'too dark to see clearly',
+    'scene unclear, cannot confirm what is ahead',
+    'มืด มองเห็นไม่ชัด',
+    'มืดเกินกว่าจะมองเห็นได้ชัดเจน',
+    'ภาพไม่ชัด ยืนยันสิ่งที่อยู่ข้างหน้าไม่ได้',
+    'ภาพไม่ชัดเจน ไม่สามารถยืนยันได้ว่าข้างหน้าคืออะไร',
+  ];
+  static const List<String> _noHazardPhrases = [
+    'no immediate hazards',
+    'no visible hazards',
+    'no hazards visible',
+    'clear of any obstacles or hazards',
+    'no obstacles or hazards',
+    'nothing blocking the path',
+    'ไม่มีอันตราย',
+    'ไม่มีสิ่งกีดขวาง',
+    'ไม่มีอันตรายใดๆ',
+    'ไม่มีสิ่งกีดขวางหรืออันตรายใดๆ',
+    'ไม่สามารถมองเห็นอันตรายในทันทีได้',
+  ];
+
   // Public API
 
   SpeechDecision evaluate(String message) =>
@@ -252,6 +308,8 @@ class SpeechCoordinator {
     String text, {
     required bool isCritical,
     required bool ttsEnabled,
+    String? traceId,
+    int? inputAcceptedAtMs,
   }) async {
     if (text.trim().isEmpty || !ttsEnabled) return;
 
@@ -268,6 +326,12 @@ class SpeechCoordinator {
           _isSpeaking && _activeIsCritical && _activeTextKey == normalized;
       if (isSameCriticalActive) return;
 
+      // Let an active critical sentence finish instead of cutting it off
+      // with a slightly different critical rephrase on the next frame.
+      if (_isSpeaking && _activeIsCritical) {
+        return;
+      }
+
       if (_isSpeaking) {
         await _tts.stop();
         _isSpeaking = false;
@@ -276,6 +340,7 @@ class SpeechCoordinator {
 
     if (_isSpeaking && !isCritical) return;
 
+    final sessionId = ++_activeSpeechSessionId;
     _isSpeaking = true;
     _activeIsCritical = isCritical;
     _activeTextKey = normalized;
@@ -286,17 +351,24 @@ class SpeechCoordinator {
     }
 
     try {
-      await _tts.speak(text);
+      await _tts.speak(
+        text,
+        traceId: traceId,
+        inputAcceptedAtMs: inputAcceptedAtMs,
+      );
     } catch (e) {
       debugPrint('[SpeechCoordinator] TTS error: $e');
     } finally {
-      _isSpeaking = false;
-      _activeIsCritical = false;
-      _activeTextKey = null;
+      if (_activeSpeechSessionId == sessionId) {
+        _isSpeaking = false;
+        _activeIsCritical = false;
+        _activeTextKey = null;
+      }
     }
   }
 
   Future<void> stop() async {
+    _activeSpeechSessionId++;
     _isSpeaking = false;
     _activeIsCritical = false;
     _activeTextKey = null;
@@ -312,12 +384,54 @@ class SpeechCoordinator {
     final t = message.toLowerCase();
     final nowMs = DateTime.now().millisecondsSinceEpoch;
 
+    if (_looksLikeLowVisibilityPhrase(t)) {
+      return const SpeechDecision(
+        priority: HazardPriority.awareness,
+        isCritical: false,
+        allowSpeak: true,
+      );
+    }
+
+    if (_looksLikeClearPhrase(t)) {
+      return const SpeechDecision(
+        priority: HazardPriority.clear,
+        isCritical: false,
+        allowSpeak: false,
+      );
+    }
+
+    if (_looksLikeSafeOpenPathContext(t)) {
+      return const SpeechDecision(
+        priority: HazardPriority.clear,
+        isCritical: false,
+        allowSpeak: false,
+      );
+    }
+
     // Tier 1: Always critical
-    if (_containsAnyLoose(t, _infrastructureHazards) ||
-        _containsAnyLoose(t, _vehicleHazards)) {
+    if (_containsAnyLoose(t, _infrastructureHazards)) {
       return const SpeechDecision(
         priority: HazardPriority.critical,
         isCritical: true,
+        allowSpeak: true,
+      );
+    }
+
+    // Vehicles: critical only when they are moving toward the user or
+    // actually blocking/crossing the walking path. Parked/side vehicles
+    // should not be escalated to critical automatically.
+    if (_containsAnyLoose(t, _vehicleHazards)) {
+      final vehicleCritical = _containsAnyLoose(t, _vehicleCriticalCues);
+      if (vehicleCritical) {
+        return const SpeechDecision(
+          priority: HazardPriority.critical,
+          isCritical: true,
+          allowSpeak: true,
+        );
+      }
+      return SpeechDecision(
+        priority: HazardPriority.awareness,
+        isCritical: false,
         allowSpeak: true,
       );
     }
@@ -403,7 +517,67 @@ class SpeechCoordinator {
   // ---------------------------------------------------------------------------
 
   bool _containsAnyLoose(String t, List<String> needles) =>
-      needles.any((n) => t.contains(n));
+      needles.any((n) => _matchesLooseNeedle(t, n));
+
+  bool _looksLikeClearPhrase(String text) {
+    final normalized = _normalizeComparisonText(text);
+    return _clearPhrases.any(
+      (phrase) =>
+          normalized == phrase ||
+          normalized.startsWith('$phrase ') ||
+          normalized.endsWith(' $phrase') ||
+          normalized.contains(' $phrase ') ||
+          normalized.contains(phrase),
+    );
+  }
+
+  bool _looksLikeLowVisibilityPhrase(String text) {
+    final normalized = _normalizeComparisonText(text);
+    return _lowVisibilityPhrases.any((phrase) => normalized == phrase);
+  }
+
+  bool _looksLikeSafeOpenPathContext(String text) {
+    final normalized = _normalizeComparisonText(text);
+    final mentionsOnlySoftHazards =
+        !_containsAnyLoose(normalized, _infrastructureHazards) &&
+        !_containsAnyLoose(normalized, _vehicleHazards) &&
+        !_containsAnyLoose(normalized, _animalHazards) &&
+        !_containsAnyLoose(normalized, _movingObjects);
+    if (!mentionsOnlySoftHazards) return false;
+
+    final hasNoHazardCue = _noHazardPhrases.any(
+      (phrase) => normalized.contains(phrase),
+    );
+    if (hasNoHazardCue) return true;
+
+    return _clearPhrases.any((phrase) => normalized.contains(phrase));
+  }
+
+  String _normalizeComparisonText(String text) {
+    final normalized = text
+        .replaceAll(RegExp("[.!?,;:\"']"), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return normalized;
+  }
+
+  bool _matchesLooseNeedle(String t, String needle) {
+    if (needle.isEmpty) return false;
+
+    // Thai terms do not use whitespace word boundaries reliably, so keep
+    // substring matching for them. English terms should match whole tokens or
+    // phrases to avoid false positives like "car" in "careful".
+    if (RegExp(r'[A-Za-z]').hasMatch(needle)) {
+      final re = RegExp(
+        r'(^|[^a-z0-9])' +
+            RegExp.escape(needle.toLowerCase()) +
+            r'([^a-z0-9]|$)',
+      );
+      return re.hasMatch(t);
+    }
+
+    return t.contains(needle);
+  }
 
   bool _hasEnWord(String t, String w) {
     final re = RegExp(r'(^|[^a-z0-9])' + RegExp.escape(w) + r'([^a-z0-9]|$)');
