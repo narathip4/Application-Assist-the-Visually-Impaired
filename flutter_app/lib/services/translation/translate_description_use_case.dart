@@ -4,13 +4,12 @@ import 'google_translate_service.dart';
 
 class TranslateDescriptionUseCase {
   final GoogleTranslateService _translator;
-  static const Duration _translateDeadline = Duration(milliseconds: 1800);
+  static const Duration _translateDeadline = Duration(milliseconds: 2000);
 
   static final RegExp _thaiRegex = RegExp(r'[\u0E00-\u0E7F]');
   static const Map<String, String> _canonicalThaiMap = {
-    'too dark to see clearly.': 'แสงสว่างไม่เพียงพอ มองไม่ชัด',
-    'scene unclear, cannot confirm what is ahead.':
-        'ภาพไม่ชัด ยืนยันสิ่งที่อยู่ข้างหน้าไม่ได้',
+    'too dark to see clearly.': 'แสงสว่างไม่เพียงพอ',
+    'scene unclear, cannot confirm what is ahead.': 'ไม่สามารถมองเห็นได้ชัดเจน',
     'the path is clear ahead.': 'ทางข้างหน้าโล่ง',
     'the path ahead is clear.': 'ทางข้างหน้าโล่ง',
     'the walkway ahead is clear.': 'ทางข้างหน้าโล่ง',

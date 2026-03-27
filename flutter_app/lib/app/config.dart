@@ -1,6 +1,6 @@
 // lib/app/config.dart
 class AppConfig {
-  static const String appName = 'ผู้ช่วยการมองเห็น';
+  static const String appName = 'VIA';
 
   static const String _defaultVlmBaseUrl =
       'https://narathip7-fastvlm-space-test.hf.space';
@@ -9,6 +9,7 @@ class AppConfig {
       'You are a walking assistant for a visually impaired person. '
       'Describe object and environment in a one short factual sentence. '
       'Include position and motion only if they are clearly visible. '
+      'And also far or near if it is clearly visible. '
       'If the scene is too dark to see, say exactly: '
       '"Too dark to see clearly." '
       'Do not mention any object, hazard, screen, desk, keyboard, or person '

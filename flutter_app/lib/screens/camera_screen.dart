@@ -91,8 +91,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   static const int _dropTickLogEvery = 20;
   static const double _sceneShiftLumaDelta = 28.0;
-  static const int _repeatNonCriticalSuppressMs = 6000;
-  static const int _repeatCriticalSuppressMs = 2500;
+  static const int _repeatNonCriticalSuppressMs = 3000;
+  static const int _repeatCriticalSuppressMs = 1500;
 
   int _consecutiveErrors = 0;
 
@@ -117,8 +117,8 @@ class _CameraScreenState extends State<CameraScreen>
     _ttsService = TtsService();
     _speech = SpeechCoordinator(tts: _ttsService);
     _speakPolicy = SpeakPolicy(
-      cooldown: const Duration(milliseconds: 3500),
-      criticalMinInterval: const Duration(milliseconds: 3000),
+      cooldown: const Duration(milliseconds: 3000),
+      criticalMinInterval: const Duration(milliseconds: 2000),
       repeatedTextWindow: const Duration(milliseconds: 5000),
     );
 
@@ -522,7 +522,7 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
-      if (!decision.allowSpeak || effectivePriority == HazardPriority.clear) {
+      if (!decision.allowSpeak) {
         return;
       }
 
@@ -551,7 +551,9 @@ class _CameraScreenState extends State<CameraScreen>
       _nextInferenceAllowedAtMs =
           DateTime.now().millisecondsSinceEpoch +
           _errorBackoffMs(_consecutiveErrors);
-      debugPrint('[Inference] VLM error: ${e.userMessage} ($_consecutiveErrors)');
+      debugPrint(
+        '[Inference] VLM error: ${e.userMessage} ($_consecutiveErrors)',
+      );
       _displayText.value = e.userMessage;
     } catch (e) {
       _consecutiveErrors++;
@@ -653,7 +655,8 @@ class _CameraScreenState extends State<CameraScreen>
         ? _repeatCriticalSuppressMs
         : _repeatNonCriticalSuppressMs;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    return _lastDeliveredTextKey == key && nowMs - _lastDeliveredAtMs < windowMs;
+    return _lastDeliveredTextKey == key &&
+        nowMs - _lastDeliveredAtMs < windowMs;
   }
 
   void _recordDeliveredOutput(String text) {

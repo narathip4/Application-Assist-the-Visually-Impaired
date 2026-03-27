@@ -26,7 +26,6 @@ class SpeechCoordinator {
 
   static const int _criticalRepeatSuppressMs = 1500;
   static const Duration _softEscalationWindow = Duration(milliseconds: 3800);
-  static const int _softEscalationHits = 2;
   static const String _softKindPerson = 'person';
 
   final Map<String, List<int>> _softHitsMs = {};
@@ -280,10 +279,8 @@ class SpeechCoordinator {
   static const List<String> _lowVisibilityPhrases = [
     'too dark to see clearly',
     'scene unclear, cannot confirm what is ahead',
-    'มืด มองเห็นไม่ชัด',
-    'มืดเกินกว่าจะมองเห็นได้ชัดเจน',
-    'ภาพไม่ชัด ยืนยันสิ่งที่อยู่ข้างหน้าไม่ได้',
-    'ภาพไม่ชัดเจน ไม่สามารถยืนยันได้ว่าข้างหน้าคืออะไร',
+    'แสงสว่างไม่เพียงพอ',
+    'ไม่สามารถมองเห็นได้ชัดเจน',
   ];
   static const List<String> _noHazardPhrases = [
     'no immediate hazards',
@@ -396,7 +393,7 @@ class SpeechCoordinator {
       return const SpeechDecision(
         priority: HazardPriority.clear,
         isCritical: false,
-        allowSpeak: false,
+        allowSpeak: true,
       );
     }
 
@@ -404,7 +401,7 @@ class SpeechCoordinator {
       return const SpeechDecision(
         priority: HazardPriority.clear,
         isCritical: false,
-        allowSpeak: false,
+        allowSpeak: true,
       );
     }
 
@@ -485,7 +482,7 @@ class SpeechCoordinator {
       return const SpeechDecision(
         priority: HazardPriority.clear,
         isCritical: false,
-        allowSpeak: false,
+        allowSpeak: true,
       );
     }
 
@@ -500,15 +497,10 @@ class SpeechCoordinator {
       );
     }
 
-    final persistent = _isPersistent(
-      nowMs,
-      softKinds,
-      prune: recordSoftSequenceHit,
-    );
     return SpeechDecision(
       priority: HazardPriority.awareness,
       isCritical: false,
-      allowSpeak: persistent,
+      allowSpeak: true,
     );
   }
 
@@ -602,24 +594,6 @@ class SpeechCoordinator {
     }
 
     return found;
-  }
-
-  bool _isPersistent(int nowMs, Set<String> keys, {required bool prune}) {
-    for (final k in keys) {
-      final hits = _softHitsMs[k];
-      if (hits == null) continue;
-
-      if (prune) {
-        _pruneOldHits(hits, nowMs);
-        if (hits.length >= _softEscalationHits) return true;
-      } else {
-        final cutoff = nowMs - _softEscalationWindow.inMilliseconds;
-        if (hits.where((ts) => ts >= cutoff).length >= _softEscalationHits) {
-          return true;
-        }
-      }
-    }
-    return false;
   }
 
   void _recordSoftHits(int nowMs, Set<String> keys) {
