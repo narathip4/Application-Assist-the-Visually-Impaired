@@ -1,68 +1,142 @@
-# Assist the Visually Impaired
+# VIA Final Project
 
-Flutter application that streams camera frames in realtime, runs the FastVLM-0.5B ONNX vision-language model on-device, and surfaces concise descriptions to assist visually impaired users.
+This repository contains a final-project prototype for assisting visually impaired users with live scene descriptions, plus the evaluation materials used to assess the system on recorded test videos.
 
-## ✨ Features
+The project has three main parts:
 
-- Live camera preview with torch, camera-switch, and audio toggle controls.
-- Realtime frame throttling and preprocessing (YUV ➜ RGB ➜ CLIP-normalised tensors).
-- ONNX Runtime integration for running the FastVLM-0.5B model locally.
-- Graceful UI states for camera permission, warm-up, inference-in-progress, and error recovery.
-- Test hook to inject a mock model service for fast widget tests.
+- `app/Application-Assist-the-Visually-Impaired/flutter_app`: Flutter application (`VIA`)
+- `data/video` and `data/video_labeled`: test videos, labels, and evaluation results
+- `docs`: Thai project report and user manual PDFs
 
-## 🚀 Getting started
+## Project Overview
 
-### Prerequisites
+`VIA` is a camera-based assistive app built with Flutter. The current implementation:
 
-- Flutter 3.19+ (or matching the version configured in this repo).
-- Dart SDK bundled with Flutter.
-- Platform toolchains for the targets you care about (Android Studio, Xcode, etc.).
+- opens the device camera and captures frames in real time
+- sends compressed image data to a FastVLM-compatible HTTP service
+- sanitizes the model response into a short walking-oriented description
+- optionally translates the description into Thai
+- reads results aloud with text-to-speech and shows them on screen
 
-### Install dependencies
+The app is focused on mobile usage. Flutter platform folders for desktop and web exist, but the main experience depends on camera access and has been structured like a phone app.
 
-```powershell
+## Repository Structure
+
+```text
+.
+├── app/
+│   └── Application-Assist-the-Visually-Impaired/
+│       └── flutter_app/
+├── data/
+│   ├── video/
+│   └── video_labeled/
+└── docs/
+```
+
+## Flutter App
+
+Path: `app/Application-Assist-the-Visually-Impaired/flutter_app`
+
+### Main capabilities
+
+- live camera preview
+- remote vision-language inference through a configurable `VLM_BASE_URL`
+- response cleanup for clearer safety-oriented output
+- optional Thai translation before playback
+- text-to-speech, subtitles, vibration, and speech-rate settings
+- periodic inference throttling for more stable output
+
+### Runtime flow
+
+1. The app boots and checks the VLM service health endpoint.
+2. It detects an available camera and opens the preview.
+3. Frames are compressed to JPEG and sent to the `/infer` endpoint.
+4. The returned caption is cleaned up and optionally translated to Thai.
+5. The result is displayed and spoken to the user.
+
+### Requirements
+
+- Flutter SDK with a Dart version compatible with `sdk: ^3.9.2`
+- a device or emulator with camera support
+- internet access to the configured VLM service
+- internet access to Google Translate if Thai translation is enabled
+
+### Quick start
+
+```bash
+cd app/Application-Assist-the-Visually-Impaired/flutter_app
 flutter pub get
-```
-
-### Add the FastVLM model asset
-
-1. Download the **FastVLM-0.5B** ONNX export (0.5B parameters) from your trusted source.
-2. Place the `.onnx` file under `models/FastVLM-0.5B-ONNX/` and rename it to `model.onnx` (or adjust the path in `FastVlmService.modelAssetPath`).
-3. The directory structure should look like:
-
-```
-models/
-	FastVLM-0.5B-ONNX/
-		model.onnx
-```
-
-> ℹ️ The app copies this asset into the platform-specific application support directory on first run. If the asset is missing, the UI will show an error but remain responsive.
-
-### Run the app
-
-```powershell
 flutter run
 ```
 
-Grant camera access when prompted. The description panel will update approximately once per second with the latest FastVLM output.
+The code currently defaults to this remote VLM endpoint:
 
-### Execute tests & static analysis
+```text
+https://narathip7-fastvlm-space-test.hf.space
+```
 
-```powershell
+You can override it at runtime:
+
+```bash
+flutter run --dart-define=VLM_BASE_URL=https://your-server.example.com
+```
+
+### Supported `--dart-define` values
+
+- `VLM_BASE_URL`: base URL for the model service
+- `VLM_MAX_NEW_TOKENS`: max tokens requested from the service
+- `VLM_REQUEST_TIMEOUT_SECONDS`: request timeout for inference calls
+- `VLM_PROMPT`: custom prompt override
+
+### Useful commands
+
+```bash
 flutter analyze
 flutter test
 ```
 
-The widget test injects a fake FastVLM service, so it runs without the real ONNX model.
+Note: the current test suite contains only a placeholder widget test, so most validation is still manual.
 
-## 🛠️ Troubleshooting
+## Evaluation Dataset
 
-- **Model warm-up fails** – ensure the ONNX file exists at the declared asset path and that the device has enough memory to load the 0.5B parameter model.
-- **Performance issues** – adjust `_inferenceInterval` in `CameraScreen` to throttle inference frequency or lower the target image size in `FastVlmService`.
-- **Platform build errors** – re-run `flutter clean && flutter pub get` and verify platform toolchains are installed.
+Path: `data/video_labeled`
 
-## 📌 Roadmap ideas
+This folder is the research evaluation workspace for the app. It includes per-case markdown sheets, aggregate CSV results, and summary documents for the videos stored in `data/video`.
 
-- Integrate text-to-speech playback of generated captions.
-- Support batching or streaming prompts for conversational assistance.
-- Add offline dataset for quick-start caption examples when the model is still warming up.
+Current evaluation snapshot from the checked-in files:
+
+- total evaluated cases: `15`
+- `pass`: `7`
+- `borderline`: `6`
+- `fail`: `2`
+- average inference latency: `2159.0 ms`
+- average time to first alert: `3412.0 ms`
+
+Scenario coverage includes:
+
+- clear-path scenes
+- static obstacles
+- moving obstacles
+- stairs and level changes
+- navigation-aid scenes
+- dark/low-visibility scenes
+
+Key files:
+
+- `data/video_labeled/README.md`: evaluation workflow and labeling rules
+- `data/video_labeled/evaluation_overview.md`: aggregate status snapshot
+- `data/video_labeled/evaluation_summary.csv`: case-by-case outcomes
+- `data/video_labeled/cases/`: one markdown sheet per video
+
+## Documentation
+
+Path: `docs`
+
+- `CS4-3_เอกสารโครงงานฉบับสมบูรณ์.pdf`: full project report
+- `CS4-3_เอกสารคู่มือการใช้งาน.pdf`: user manual
+
+## Notes
+
+- The app code in this repository is network-backed today; it calls a remote VLM service over HTTP rather than running an ONNX model locally inside Flutter.
+- Thai translation uses the public Google Translate endpoint from the app code, so translation may fail if the network is unavailable.
+- Camera permission is required for the main experience to work.
