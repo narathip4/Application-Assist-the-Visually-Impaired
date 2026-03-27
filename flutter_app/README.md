@@ -2,12 +2,6 @@
 
 This repository contains a final-project prototype for assisting visually impaired users with live scene descriptions, plus the evaluation materials used to assess the system on recorded test videos.
 
-The project has three main parts:
-
-- `app/Application-Assist-the-Visually-Impaired/flutter_app`: Flutter application (`VIA`)
-- `data/video` and `data/video_labeled`: test videos, labels, and evaluation results
-- `docs`: Thai project report and user manual PDFs
-
 ## Project Overview
 
 `VIA` is a camera-based assistive app built with Flutter. The current implementation:
@@ -94,49 +88,6 @@ flutter run --dart-define=VLM_BASE_URL=https://your-server.example.com
 flutter analyze
 flutter test
 ```
-
-Note: the current test suite contains only a placeholder widget test, so most validation is still manual.
-
-## Evaluation Dataset
-
-Path: `data/video_labeled`
-
-This folder is the research evaluation workspace for the app. It includes per-case markdown sheets, aggregate CSV results, and summary documents for the videos stored in `data/video`.
-
-Current evaluation snapshot from the checked-in files:
-
-- total evaluated cases: `15`
-- `pass`: `7`
-- `borderline`: `6`
-- `fail`: `2`
-- average inference latency: `2159.0 ms`
-- average time to first alert: `3412.0 ms`
-
-Scenario coverage includes:
-
-- clear-path scenes
-- static obstacles
-- moving obstacles
-- stairs and level changes
-- navigation-aid scenes
-- dark/low-visibility scenes
-
-Key files:
-
-- `data/video_labeled/README.md`: evaluation workflow and labeling rules
-- `data/video_labeled/evaluation_overview.md`: aggregate status snapshot
-- `data/video_labeled/evaluation_summary.csv`: case-by-case outcomes
-- `data/video_labeled/cases/`: one markdown sheet per video
-
-## Documentation
-
-Path: `docs`
-
-- `CS4-3_เอกสารโครงงานฉบับสมบูรณ์.pdf`: full project report
-- `CS4-3_เอกสารคู่มือการใช้งาน.pdf`: user manual
-
-## Notes
-
 - The app code in this repository is network-backed today; it calls a remote VLM service over HTTP rather than running an ONNX model locally inside Flutter.
 - Thai translation uses the public Google Translate endpoint from the app code, so translation may fail if the network is unavailable.
 - Camera permission is required for the main experience to work.
