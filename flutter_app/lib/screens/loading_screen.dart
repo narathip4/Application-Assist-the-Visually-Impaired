@@ -49,7 +49,7 @@ class _LoadingScreenState extends State<LoadingScreen>
 
       final vlm = FastVlmService(
         AppConfig.vlmBaseUrl,
-        timeout: const Duration(seconds: 90),
+        timeout: AppConfig.vlmRequestTimeout,
       );
 
       // Warm-up (kept as-is; safe even if no-op)

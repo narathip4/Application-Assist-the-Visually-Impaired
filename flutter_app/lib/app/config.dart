@@ -1,62 +1,62 @@
 // lib/app/config.dart
 class AppConfig {
-  static const String appName = 'ผู้ช่วยการมองเห็น';
+  static const String appName = 'VIA';
 
-  // Hugging Face Space base URL
-  static const String vlmBaseUrl =
+  static const String _defaultVlmBaseUrl =
       'https://narathip7-fastvlm-space-test.hf.space';
 
-  // VLM parameters
-  // maxNewTokens: Limits response length to keep descriptions concise
-  // Lower values = faster responses, but may cut off important details
-  static const int maxNewTokens = 32;
+  static const String _defaultPrompt =
+      'You are a walking assistant for a visually impaired person. '
+      'Describe object and environment in a one short factual sentence. '
+      'Include position and motion only if they are clearly visible. '
+      'And also far or near if it is clearly visible. '
+      'If the scene is too dark to see, say exactly: '
+      '"Too dark to see clearly." '
+      'Do not mention any object, hazard, screen, desk, keyboard, or person '
+      'unless it is clearly visible. '
+      'If the walking path looks open and there is no important nearby hazard, '
+      'say exactly: "The path ahead is clear." '
+      'If you can see the scene but are unsure what something is, say exactly: '
+      '"Scene unclear, cannot confirm what is ahead." '
+      'Use plain natural language with no labels, no bullet points, '
+      'No extra explanation. One sentence only.';
 
-  // Image optimization settings
-  // jpegMaxSide: Reduces image size for faster processing while maintaining recognition quality
-  // jpegQuality: Balances file size against image clarity (60 is a good compromise)
-  static const int jpegMaxSide = 360;
-  static const int jpegQuality = 60;
+  // --dart-define=VLM_BASE_URL=https://api
+  static const String vlmBaseUrl = String.fromEnvironment(
+    'VLM_BASE_URL',
+    defaultValue: _defaultVlmBaseUrl,
+  );
 
-  // Single default safety prompt (used in all inference runs).
-  // Keep one concise sentence for clear TTS playback.
-  static const String safetyPrompt = '''
-You are a real-time safety assistant for a visually impaired user.
+  // --dart-define=VLM_MAX_NEW_TOKENS=40
+  static const int maxNewTokens = int.fromEnvironment(
+    'VLM_MAX_NEW_TOKENS',
+    defaultValue: 32,
+  );
 
-Return exactly ONE short spoken sentence (8-16 words).
-Focus only on immediate walking safety.
+  // --dart-define=VLM_REQUEST_TIMEOUT_SECONDS=20
+  static const int vlmRequestTimeoutSeconds = int.fromEnvironment(
+    'VLM_REQUEST_TIMEOUT_SECONDS',
+    defaultValue: 20,
+  );
+  static const Duration vlmRequestTimeout = Duration(
+    seconds: vlmRequestTimeoutSeconds,
+  );
 
-Rules:
-- Mention only the highest-risk object or hazard.
-- Include one position word: ahead, left, right, or center.
-- Include movement if visible: approaching, crossing, or stationary.
-- Use "Careful," for hazards.
-- Use neutral wording if no immediate hazard.
-- No distances or measurements.
-- No extra explanation.
-- No chatbot/polite phrases (never say: "I hope this helps", "let me know", "anything else").
-- Output one sentence only.
+  static const int jpegMaxSide = 320;
+  static const int jpegQuality = 50;
 
-Special cases:
-- If unclear: "Image unclear, please scan again."
-- If dark: "Image too dark, please move to a brighter area."
-- If traffic: "Careful, traffic area detected, stop and reorient."
+  // --dart-define=VLM_PROMPT=Your prompt here
+  static const String prompt = String.fromEnvironment(
+    'VLM_PROMPT',
+    defaultValue: _defaultPrompt,
+  );
 
-Examples:
-- "Careful, a man in a white shirt is walking ahead toward you."
-- "Careful, a white dog is ahead and getting closer."
-- "A walking path is ahead with glass panels on the side."
-''';
-
-  // User-facing message shown while processing
-  // Changed to better reflect the uncertainty inherent in the process
   static const String fallbackText = 'กำลังประมวลผลภาพ...';
 
-  // Sequence inference settings
-  // When enabled, consecutive frames are combined into one VLM input image.
+  // Sequence inference
   static const bool useSequenceInference = true;
   static const int sequenceFrameCount = 3;
-  // Timing configuration
-  // inferenceInterval: How often the app captures and processes new images
-  // 1200ms (1.2 seconds) balances responsiveness with processing load
-  static const Duration inferenceInterval = Duration(milliseconds: 900);
+  static const int sequenceMaxBufferBytes = 120 * 1024;
+
+  static const Duration inferenceInterval = Duration(milliseconds: 2000);
 }
