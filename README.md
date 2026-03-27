@@ -2,12 +2,6 @@
 
 This repository contains a final-project prototype for assisting visually impaired users with live scene descriptions, plus the evaluation materials used to assess the system on recorded test videos.
 
-The project has three main parts:
-
-- `app/Application-Assist-the-Visually-Impaired/flutter_app`: Flutter application (`VIA`)
-- `data/video` and `data/video_labeled`: test videos, labels, and evaluation results
-- `docs`: Thai project report and user manual PDFs
-
 ## Project Overview
 
 `VIA` is a camera-based assistive app built with Flutter. The current implementation:
