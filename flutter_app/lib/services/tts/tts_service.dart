@@ -33,11 +33,11 @@ class TtsService {
         // ignore: avoid_print
         print(
           '[METRIC] trace=${_activeTraceId!} '
-          'tts_start_ms=$nowMs input_to_tts_start_ms=$deltaMs',
+          'tts_ms=$deltaMs',
         );
       }
       // ignore: avoid_print
-      print('[TTS] start');
+      print('[TTS] start trace=${_activeTraceId ?? "-"}');
     });
 
     _tts.setCompletionHandler(() {
@@ -118,7 +118,7 @@ class TtsService {
     _speakCompleter = Completer<void>();
     final speakFuture = _speakCompleter!.future;
     // ignore: avoid_print
-    print('[TTS] speak="$text"');
+    print('[TTS] queue="${_shortLogText(text)}"');
     await _tts.speak(text);
 
     return speakFuture;
@@ -139,5 +139,11 @@ class TtsService {
     _activeTraceId = null;
     _activeInputAcceptedAtMs = null;
     _tts.stop();
+  }
+
+  String _shortLogText(String text, {int max = 72}) {
+    final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.length <= max) return normalized;
+    return '${normalized.substring(0, max - 3)}...';
   }
 }

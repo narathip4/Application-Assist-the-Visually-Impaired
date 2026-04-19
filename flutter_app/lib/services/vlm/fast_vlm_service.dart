@@ -67,7 +67,7 @@ class FastVlmService {
     caseSensitive: false,
   );
   static final _clearPathRegex = RegExp(
-    r"(path (is )?clear|clear path|path ahead is clear|walkway ahead is clear|way ahead is clear|open and clear ahead|appears to be open and clear ahead|no obstacles? ahead|nothing blocking the path)",
+    r"^(?:the\s+)?(?:path|walkway|way)(?:\s+ahead)?\s+(?:is\s+)?clear\.?$|^clear\s+path(?:\s+ahead)?\.?$|^(?:there\s+are\s+)?no\s+obstacles?\s+ahead\.?$|^nothing\s+(?:is\s+)?blocking\s+the\s+path\.?$",
     caseSensitive: false,
   );
   static final _hazardMentionRegex = RegExp(
@@ -78,8 +78,20 @@ class FastVlmService {
     r"(road|street|intersection|crosswalk|lane|highway)",
     caseSensitive: false,
   );
+  static final _trafficTopologyRegex = RegExp(
+    r"(intersection|crosswalk|lane|highway)",
+    caseSensitive: false,
+  );
   static final _trafficVehicleRegex = RegExp(
     r"(car|truck|bus|motorcycle|motorbike|vehicle)",
+    caseSensitive: false,
+  );
+  static final _stationaryVehicleRegex = RegExp(
+    r"(parked|stationary|stopped|จอด)",
+    caseSensitive: false,
+  );
+  static final _trafficMotionRegex = RegExp(
+    r"(moving|approaching|driving|crossing|blocking|traffic)",
     caseSensitive: false,
   );
   static final _trafficObjectMatchers = <MapEntry<RegExp, String>>[
@@ -244,7 +256,7 @@ class FastVlmService {
         // debug (short)
         // ignore: avoid_print
         print(
-          '[VLM] status=${response.statusCode} body=${response.body.length > 220 ? response.body.substring(0, 220) : response.body}',
+          '[VLM] status=${response.statusCode} body=${response.body.length > 140 ? response.body.substring(0, 140) : response.body}',
         );
 
         if (response.statusCode != 200) {
@@ -400,18 +412,24 @@ class FastVlmService {
   }
 
   /// Returns true if [text] is a verbatim copy of one of the Special-Cases
-  /// canned phrases baked into the prompt template.  These should only ever
-  /// be produced by our own sanitizer, never parroted from the model.
-  bool _isVerbatimSpecialCaseEcho(String text) {
+  /// canned phrases baked into the prompt template.
+  ///
+  /// These exact phrases are legitimate model outputs because the prompt
+  /// explicitly instructs the model to emit them for fallback cases.
+  String? _normalizeVerbatimSpecialCase(String text) {
     final t = text.toLowerCase().trim().replaceAll(RegExp(r'\s+'), ' ');
-    const verbatim = <String>[
-      'scene unclear, cannot confirm what is ahead.',
-      'too dark to see clearly.',
-      'the path ahead is clear.',
-      'careful, traffic area detected.',
-      'careful, traffic area detected ahead.',
-    ];
-    return verbatim.contains(t);
+    switch (t) {
+      case 'scene unclear, cannot confirm what is ahead.':
+        return 'Scene unclear, cannot confirm what is ahead.';
+      case 'too dark to see clearly.':
+        return 'Too dark to see clearly.';
+      case 'the path ahead is clear.':
+        return 'The path ahead is clear.';
+      case 'careful, traffic area detected.':
+      case 'careful, traffic area detected ahead.':
+        return 'Careful, traffic area ahead.';
+    }
+    return null;
   }
 
   String _sanitize(String raw) {
@@ -458,12 +476,9 @@ class FastVlmService {
       return 'Scene unclear, cannot confirm what is ahead.';
     }
 
-    // After sentence trimming, re-check: if the kept sentence is itself one of
-    // our Special-Cases canned phrases echoed verbatim, the model is parroting
-    // the prompt rather than describing the scene.
-    if (_isVerbatimSpecialCaseEcho(text)) {
-      debugPrint('[VLM] verbatim special-case echo detected, dropping.');
-      return '';
+    final specialCase = _normalizeVerbatimSpecialCase(text);
+    if (specialCase != null) {
+      return specialCase;
     }
 
     // Strict fallback normalization.
@@ -486,10 +501,6 @@ class FastVlmService {
   bool _looksLikeDarkScene(String text) {
     final t = text.toLowerCase();
     if (_darkFallbackPrefixRegex.hasMatch(t)) return true;
-    if (!RegExp(r"\bif dark\b", caseSensitive: false).hasMatch(t) &&
-        _darkRegex.hasMatch(t)) {
-      return true;
-    }
     return _darkRegex.hasMatch(t) && _visibilityUncertainRegex.hasMatch(t);
   }
 
@@ -626,8 +637,19 @@ class FastVlmService {
     // Treat explicit model assertion as traffic only when it is the core message.
     if (t.startsWith('careful, traffic area detected')) return true;
 
-    // Require both road-scene and vehicle context to avoid false alarms.
-    return _trafficSceneRegex.hasMatch(t) && _trafficVehicleRegex.hasMatch(t);
+    if (_trafficTopologyRegex.hasMatch(t)) return true;
+
+    // Simple mentions like "parked motorcycles on the right" plus "street"
+    // should stay as natural scene descriptions, not traffic warnings.
+    if (_stationaryVehicleRegex.hasMatch(t) && !_trafficMotionRegex.hasMatch(t)) {
+      return false;
+    }
+
+    // Traffic warning only when a roadway/street context is paired with
+    // vehicles that look active or traffic-related.
+    return _trafficSceneRegex.hasMatch(t) &&
+        _trafficVehicleRegex.hasMatch(t) &&
+        _trafficMotionRegex.hasMatch(t);
   }
 
   String _normalizeTrafficScene(String text) {
@@ -704,4 +726,7 @@ class FastVlmService {
     }
     return downgraded;
   }
+
+  @visibleForTesting
+  String sanitizeForTest(String raw) => _sanitize(raw);
 }

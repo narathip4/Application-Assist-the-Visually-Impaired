@@ -16,6 +16,7 @@ import '../screens/setting_screen.dart';
 import '../services/tts/speak_policy.dart';
 import '../services/tts/tts_service.dart';
 import '../services/tts/speech_coordinator.dart';
+import '../services/tts/thai_tts_cleanup.dart';
 
 import '../services/translation/google_translate_service.dart';
 import '../services/translation/translate_description_use_case.dart';
@@ -78,13 +79,14 @@ class _CameraScreenState extends State<CameraScreen>
   Timer? _processingTimer;
   Completer<void>? _frameProcessingDone;
 
-  CameraImage? _latestFrame;
+  YuvFrameSnapshot? _latestFrame;
   final List<Uint8List> _sequenceFrameBuffer = <Uint8List>[];
   int _latestFrameTimestamp = 0;
   int _lastProcessedTimestamp = 0;
   int _processingEpoch = 0;
   int _droppedTicks = 0;
   int _nextInferenceAllowedAtMs = 0;
+  bool _awaitingFrameCapture = false;
   double? _lastSceneLuma;
   String? _lastDeliveredTextKey;
   int _lastDeliveredAtMs = 0;
@@ -316,9 +318,15 @@ class _CameraScreenState extends State<CameraScreen>
       await newController.startImageStream((img) {
         if (_isDisposed || myGen != _streamGen) return;
         if (!_shouldProcessImage || !_isModelReady) return;
+        if (_isProcessingFrame || !_awaitingFrameCapture) return;
 
-        _latestFrame = img;
-        _latestFrameTimestamp = DateTime.now().millisecondsSinceEpoch;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        if (nowMs < _nextInferenceAllowedAtMs) return;
+
+        _latestFrame = YuvFrameSnapshot.fromCameraImage(img);
+        _latestFrameTimestamp = nowMs;
+        _awaitingFrameCapture = false;
+        unawaited(_processLatestFrame());
       });
 
       _startProcessingTimer();
@@ -355,6 +363,7 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (_) {}
 
     _latestFrame = null;
+    _awaitingFrameCapture = false;
     _sequenceFrameBuffer.clear();
   }
 
@@ -375,6 +384,7 @@ class _CameraScreenState extends State<CameraScreen>
   void _startProcessingTimer() {
     _stopProcessingTimer();
     if (!_shouldProcessImage || !_isModelReady || _isDisposed) return;
+    _awaitingFrameCapture = true;
 
     _processingTimer = Timer.periodic(AppConfig.inferenceInterval, (_) {
       if (_isDisposed || !_shouldProcessImage || !_isModelReady) return;
@@ -387,16 +397,7 @@ class _CameraScreenState extends State<CameraScreen>
         _countDroppedTick();
         return;
       }
-      if (_latestFrame == null) {
-        _countDroppedTick();
-        return;
-      }
-      if (_latestFrameTimestamp <= _lastProcessedTimestamp) {
-        _countDroppedTick();
-        return;
-      }
-
-      _processLatestFrame();
+      _awaitingFrameCapture = true;
     });
   }
 
@@ -471,6 +472,11 @@ class _CameraScreenState extends State<CameraScreen>
         enabled: _translateToThai,
       );
       final cleanedTranslated = _cleanFinalOutputSentence(translated);
+      _logTextPipeline(
+        raw: rawSelected.message,
+        translated: translated,
+        cleaned: cleanedTranslated,
+      );
       final translationFallbackToEnglish =
           _translateToThai &&
           rawSelected.message.trim().isNotEmpty &&
@@ -489,9 +495,8 @@ class _CameraScreenState extends State<CameraScreen>
       }
       final outputReadyAtMs = DateTime.now().millisecondsSinceEpoch;
       debugPrint(
-        '[METRIC] trace=$traceId output_ready_ms=$outputReadyAtMs '
-        'input_to_output_ms=${outputReadyAtMs - inputAcceptedAtMs} '
-        'text="$say"',
+        '[METRIC] trace=$traceId output_ms=${outputReadyAtMs - inputAcceptedAtMs} '
+        'text="${_shortLogText(say)}"',
       );
 
       final decision = _speech.evaluate(say);
@@ -511,8 +516,9 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       debugPrint(
-        '[TTS_GATE] decision allow=${decision.allowSpeak} '
-        'critical=$isCritical priority=$effectivePriority text="$say"',
+        '[TTS_GATE] allow=${decision.allowSpeak} '
+        'priority=$effectivePriority critical=$isCritical '
+        'text="${_shortLogText(say)}"',
       );
 
       if (translationFallbackToEnglish) {
@@ -531,8 +537,8 @@ class _CameraScreenState extends State<CameraScreen>
         isCritical: isCritical,
       );
       debugPrint(
-        '[TTS_GATE] policy shouldSpeak=${speakDecision.shouldSpeak} '
-        'critical=$isCritical text="${speakDecision.text}"',
+        '[TTS_GATE] speak=${speakDecision.shouldSpeak} '
+        'critical=$isCritical text="${_shortLogText(speakDecision.text)}"',
       );
       if (!speakDecision.shouldSpeak) return;
       _triggerVibration(isCritical);
@@ -600,11 +606,34 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     out = out.replaceAll(RegExp(r'''["“”']+$'''), '');
+    if (_containsThaiText(out)) {
+      out = cleanThaiTtsText(out);
+    }
 
     return out.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
-  void _refreshSceneContext(CameraImage image) {
+  void _logTextPipeline({
+    required String raw,
+    required String translated,
+    required String cleaned,
+  }) {
+    final rawShort = _shortLogText(raw);
+    final translatedShort = _shortLogText(translated);
+    final cleanedShort = _shortLogText(cleaned);
+    if (rawShort == translatedShort && translatedShort == cleanedShort) return;
+    debugPrint(
+      '[TEXT] raw="$rawShort" th="$translatedShort" clean="$cleanedShort"',
+    );
+  }
+
+  String _shortLogText(String text, {int max = 72}) {
+    final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.length <= max) return normalized;
+    return '${normalized.substring(0, max - 3)}...';
+  }
+
+  void _refreshSceneContext(YuvFrameSnapshot image) {
     final currentLuma = _estimateSceneLuma(image);
     final previousLuma = _lastSceneLuma;
     _lastSceneLuma = currentLuma;
@@ -621,10 +650,8 @@ class _CameraScreenState extends State<CameraScreen>
     _lastDeliveredAtMs = 0;
   }
 
-  double _estimateSceneLuma(CameraImage image) {
-    if (image.planes.isEmpty) return _lastSceneLuma ?? 0;
-    final yPlane = image.planes.first;
-    final bytes = yPlane.bytes;
+  double _estimateSceneLuma(YuvFrameSnapshot image) {
+    final bytes = image.yBytes;
     if (bytes.isEmpty || image.width <= 0 || image.height <= 0) {
       return _lastSceneLuma ?? 0;
     }
@@ -635,7 +662,7 @@ class _CameraScreenState extends State<CameraScreen>
     var count = 0;
 
     for (var y = 0; y < image.height; y += rowStep) {
-      final rowOffset = y * yPlane.bytesPerRow;
+      final rowOffset = y * image.yRowStride;
       for (var x = 0; x < image.width; x += colStep) {
         final index = rowOffset + x;
         if (index >= bytes.length) break;
@@ -813,6 +840,7 @@ class _CameraScreenState extends State<CameraScreen>
     _displayText.value = 'กำลังสลับกล้อง...';
     _announceUiAction('กำลังสลับกล้อง');
     _shouldProcessImage = false;
+    _awaitingFrameCapture = false;
 
     try {
       _stopProcessingTimer();
@@ -871,6 +899,7 @@ class _CameraScreenState extends State<CameraScreen>
         // Clear stale sequence frames so old visual context from before the
         // pause does not bleed into the first inference after restart.
         _sequenceFrameBuffer.clear();
+        _awaitingFrameCapture = true;
         _nextInferenceAllowedAtMs = 0;
 
         _displayText.value = _kStatusAnalyzing;
@@ -878,6 +907,7 @@ class _CameraScreenState extends State<CameraScreen>
         _announceUiAction('เริ่มการวิเคราะห์แล้ว');
       } else {
         _processingEpoch++;
+        _awaitingFrameCapture = false;
         _displayText.value = _kStatusStopped;
         _stopProcessingTimer();
         await _speech.stop();

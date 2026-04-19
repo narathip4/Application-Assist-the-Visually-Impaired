@@ -34,7 +34,7 @@ class SpeechCoordinator {
 
   // Hazard keyword lists
 
-  static const List<String> _infrastructureHazards = [
+  static const List<String> _immediateInfrastructureHazards = [
     'บันได',
     'ขั้นบันได',
     'บันไดเลื่อน',
@@ -42,8 +42,6 @@ class SpeechCoordinator {
     'หลุมก่อสร้าง',
     'ฝาท่อ',
     'ลื่น',
-    'ขอบ',
-    'ขอบทาง',
     'ผนัง',
     'กำแพง',
     'เสา',
@@ -70,8 +68,6 @@ class SpeechCoordinator {
     'construction pit',
     'manhole',
     'slippery',
-    'edge',
-    'curb',
     'wall',
     'pole',
     'pillar',
@@ -89,6 +85,12 @@ class SpeechCoordinator {
     'traffic cone',
     'street vendor',
     'food stall',
+  ];
+  static const List<String> _contextualInfrastructureHazards = [
+    'ขอบ',
+    'ขอบทาง',
+    'edge',
+    'curb',
   ];
 
   static const List<String> _vehicleHazards = [
@@ -144,6 +146,22 @@ class SpeechCoordinator {
     'pedestrian',
     'wheelchair',
   ];
+  static const List<String> _softCriticalCues = [
+    'ตรงหน้า',
+    'ใกล้มาก',
+    'กำลังเข้าใกล้',
+    'ตัดหน้า',
+    'ขวางทาง',
+    'ขวางหน้า',
+    'ชิด',
+    'ติด',
+    'in front',
+    'very close',
+    'approaching',
+    'in your path',
+    'crossing',
+    'blocking',
+  ];
 
   static const Map<String, String> _softHazardCategoryTh = {
     'คน': _softKindPerson,
@@ -188,7 +206,6 @@ class SpeechCoordinator {
   static const List<String> _directionalCues = [
     'ซ้าย',
     'ขวา',
-    'หน้า',
     'หลัง',
     'ซ้ายมือ',
     'ขวามือ',
@@ -406,10 +423,19 @@ class SpeechCoordinator {
     }
 
     // Tier 1: Always critical
-    if (_containsAnyLoose(t, _infrastructureHazards)) {
+    if (_containsAnyLoose(t, _immediateInfrastructureHazards)) {
       return const SpeechDecision(
         priority: HazardPriority.critical,
         isCritical: true,
+        allowSpeak: true,
+      );
+    }
+
+    if (_containsAnyLoose(t, _contextualInfrastructureHazards)) {
+      final near = _containsAnyLoose(t, _nearCues);
+      return SpeechDecision(
+        priority: near ? HazardPriority.critical : HazardPriority.awareness,
+        isCritical: near,
         allowSpeak: true,
       );
     }
@@ -456,7 +482,7 @@ class SpeechCoordinator {
     // Directional + proximity or infrastructure
     if (_containsAnyLoose(t, _directionalCues) &&
         (_containsAnyLoose(t, _nearCues) ||
-            _containsAnyLoose(t, _infrastructureHazards))) {
+            _containsAnyLoose(t, _immediateInfrastructureHazards))) {
       return const SpeechDecision(
         priority: HazardPriority.critical,
         isCritical: true,
@@ -488,8 +514,8 @@ class SpeechCoordinator {
 
     if (recordSoftSequenceHit) _recordSoftHits(nowMs, softKinds);
 
-    final hasNearCue = _containsAnyLoose(t, _nearCues);
-    if (hasNearCue) {
+    final hasSoftCriticalCue = _containsAnyLoose(t, _softCriticalCues);
+    if (hasSoftCriticalCue) {
       return const SpeechDecision(
         priority: HazardPriority.critical,
         isCritical: true,
@@ -531,7 +557,8 @@ class SpeechCoordinator {
   bool _looksLikeSafeOpenPathContext(String text) {
     final normalized = _normalizeComparisonText(text);
     final mentionsOnlySoftHazards =
-        !_containsAnyLoose(normalized, _infrastructureHazards) &&
+        !_containsAnyLoose(normalized, _immediateInfrastructureHazards) &&
+        !_containsAnyLoose(normalized, _contextualInfrastructureHazards) &&
         !_containsAnyLoose(normalized, _vehicleHazards) &&
         !_containsAnyLoose(normalized, _animalHazards) &&
         !_containsAnyLoose(normalized, _movingObjects);
