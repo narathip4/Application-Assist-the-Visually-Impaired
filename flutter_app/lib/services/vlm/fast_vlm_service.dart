@@ -2,10 +2,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:app/app/config.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart' as http_parser;
 
@@ -253,9 +252,7 @@ class FastVlmService {
 
         final response = await _sendMultipartWithinTimeout(req);
 
-        // debug (short)
-        // ignore: avoid_print
-        print(
+        _debugLog(
           '[VLM] status=${response.statusCode} body=${response.body.length > 140 ? response.body.substring(0, 140) : response.body}',
         );
 
@@ -395,6 +392,12 @@ class FastVlmService {
     }
     if (decoded is String) return decoded;
     return '';
+  }
+
+  void _debugLog(String message) {
+    if (kDebugMode) {
+      debugPrint(message);
+    }
   }
 
   /// Returns true if [text] looks like the model echoed back the system prompt.

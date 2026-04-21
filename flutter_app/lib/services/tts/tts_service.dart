@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -30,14 +31,12 @@ class TtsService {
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (_activeTraceId != null && _activeInputAcceptedAtMs != null) {
         final deltaMs = nowMs - _activeInputAcceptedAtMs!;
-        // ignore: avoid_print
-        print(
+        _debugLog(
           '[METRIC] trace=${_activeTraceId!} '
           'tts_ms=$deltaMs',
         );
       }
-      // ignore: avoid_print
-      print('[TTS] start trace=${_activeTraceId ?? "-"}');
+      _debugLog('[TTS] start trace=${_activeTraceId ?? "-"}');
     });
 
     _tts.setCompletionHandler(() {
@@ -117,8 +116,7 @@ class TtsService {
     _activeInputAcceptedAtMs = inputAcceptedAtMs;
     _speakCompleter = Completer<void>();
     final speakFuture = _speakCompleter!.future;
-    // ignore: avoid_print
-    print('[TTS] queue="${_shortLogText(text)}"');
+    _debugLog('[TTS] queue="${_shortLogText(text)}"');
     await _tts.speak(text);
 
     return speakFuture;
@@ -145,5 +143,11 @@ class TtsService {
     final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (normalized.length <= max) return normalized;
     return '${normalized.substring(0, max - 3)}...';
+  }
+
+  void _debugLog(String message) {
+    if (kDebugMode) {
+      debugPrint(message);
+    }
   }
 }

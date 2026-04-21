@@ -55,6 +55,60 @@ flutter test
 
 The widget test injects a fake FastVLM service, so it runs without the real ONNX model.
 
+## Android release builds
+
+The Android app is configured to use:
+
+- Application ID: `app.via.visualassistant`
+- Release signing from `android/key.properties`
+
+### 1. Create an upload keystore
+
+Run this from the project root:
+
+```bash
+keytool -genkeypair -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+```
+
+### 2. Add local signing config
+
+`android/key.properties` is already prepared locally for this workspace.
+Open it and replace the placeholder values with your real passwords and alias:
+
+```properties
+storePassword=your-keystore-password
+keyPassword=your-key-password
+keyAlias=upload
+storeFile=app/upload-keystore.jks
+```
+
+### 3. Build a signed release
+
+```bash
+flutter build apk --release --dart-define=VLM_BASE_URL=https://your-api
+flutter build appbundle --release --dart-define=VLM_BASE_URL=https://your-api
+```
+
+Or use the helper script:
+
+```bash
+bash scripts/build_android_release.sh apk
+bash scripts/build_android_release.sh aab
+bash scripts/build_android_release.sh apk-split
+```
+
+You can also pass the production backend URL directly:
+
+```bash
+bash scripts/build_android_release.sh aab https://your-api
+VLM_BASE_URL=https://your-api bash scripts/build_android_release.sh apk
+```
+
+Outputs:
+
+- APK: `build/app/outputs/flutter-apk/app-release.apk`
+- AAB: `build/app/outputs/bundle/release/app-release.aab`
+
 ## 🛠️ Troubleshooting
 
 - **Model warm-up fails** – ensure the ONNX file exists at the declared asset path and that the device has enough memory to load the 0.5B parameter model.
